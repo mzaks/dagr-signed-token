@@ -71,8 +71,8 @@ npx tsx examples/typescript/demo.ts
 # Python (stdlib hmac/hashlib; codec is the pure-Python reflective target)
 python3 examples/python/demo.py
 
-# Mojo (via pixi; HMAC + file I/O through Python interop)
-pixi run --manifest-path <RethinkingDagrMojo>/pixi.toml \
+# Mojo (self-contained pixi project in examples/mojo; HMAC + file I/O via Python interop)
+pixi run --manifest-path examples/mojo/pixi.toml \
   mojo run -I gen/mojo examples/mojo/main.mojo
 
 # Odin (HMAC via core:crypto/hmac)

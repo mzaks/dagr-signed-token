@@ -10,6 +10,10 @@ examples/odin/dwt-odin
 __mojocache__/
 *.bin
 
+# pixi env for the Mojo example (pixi.toml + pixi.lock are committed; the ~1 GB
+# solved environment is not).
+.pixi/
+
 # Python / editor
 __pycache__/
 .build/

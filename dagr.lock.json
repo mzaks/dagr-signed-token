@@ -255,7 +255,7 @@
   "outputs": {
     "gen/mojo/dagr_reader.mojo": "sha256:e171aad797fbfe73016190e067ef8d5540364b773a79318d3b9d41ba108ef3fe",
     "gen/mojo/dagr_writer.mojo": "sha256:e33c5f8e0df3685f12b83bd70c1110809fc750613aac0748339a1f39033e7a63",
-    "gen/mojo/token_arena.mojo": "sha256:520469fe4fcfe6140680dd028d6122d04bd961151eec17e924af28d159a66cba",
+    "gen/mojo/token_arena.mojo": "sha256:26b6674969dd07a702943ac7e691978c8ac3e2042a1badc9f539e15a25dac534",
     "gen/mojo/token_reader.mojo": "sha256:f5b0db986438fe7f4768624439fdcb7f784a31581c3c423210a2e65b2eaba2d9",
     "gen/mojo/token_restore.mojo": "sha256:f84bc5a439ac1de58e256efbef7153d33086bb80ecc5682aeb0e1aeaf0a4c41c",
     "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
@@ -278,7 +278,7 @@
     "gen/rust/Cargo.toml": "sha256:9aeb182fe7033184b0165c50fd292d8593af894f23e3e294ebaea5a0634d93e2",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
     "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
-    "gen/rust/src/token.rs": "sha256:4ec058a339299c6dfaded2ae89aee4353adfad884de14e4852a2c4e5eccc6312",
+    "gen/rust/src/token.rs": "sha256:5e253a617b0235aac10cda9c51962fd085c79c598d88f758543724ddc7ba8b12",
     "gen/swift/Package.swift": "sha256:9c56f04a5e5fb418f2150c72df7692eb9adb495690ec9c70adf78c805f436060",
     "gen/swift/Sources/dagr_web_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
     "gen/swift/Sources/dagr_web_token/Token.swift": "sha256:fb83efd9643bbafc9175d677eea54a6eb0bc904001c7792ef8e0f1996302d7cf",
@@ -290,7 +290,7 @@
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-02T16:42:19.577421+00:00",
+    "generated_at": "2026-09-02T17:11:11.641142+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },

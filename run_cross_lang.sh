@@ -25,10 +25,11 @@ TS=(npx --yes tsx examples/typescript/demo.ts)
 echo "== [build] Python (pure-Python, no build step) =="
 PYTHON=(python3 examples/python/demo.py)
 
-echo "== [build] Mojo (compile once via pixi) =="
-# Mojo has no compiler on PATH here; use the RethinkingDagrMojo pixi env. Build the
-# example once (rather than `mojo run` per call) and run the binary inside that env.
-MOJO_PIXI="${MOJO_PIXI:-/Users/mzaks_pro/dev/RethinkingDagr/RethinkingDagrMojo/pixi.toml}"
+echo "== [build] Mojo (compile once via the local pixi project) =="
+# Mojo has no compiler on PATH here; examples/mojo is a self-contained pixi project
+# (pins mojo/max — no dependency on any other project's env). Build the example once
+# (rather than `mojo run` per call) and run the binary inside that env.
+MOJO_PIXI="${MOJO_PIXI:-$ROOT/examples/mojo/pixi.toml}"
 pixi run --manifest-path "$MOJO_PIXI" mojo build -I "$ROOT/gen/mojo" \
   "$ROOT/examples/mojo/main.mojo" -o "$ROOT/examples/mojo/dwt-mojo"
 MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dwt-mojo")
