@@ -13,7 +13,7 @@ with Dagr's customizable header ("14 Customizable Header.md"), Shape A:
 Edit here, then run `dagr build`.
 """
 from dagr_dsl import t, required, timestamp, Node, UnionType, DataGraph
-from dagr_config import Library, Swift, Rust, TypeScript, Python, Mojo
+from dagr_config import Library, Swift, Rust, TypeScript, Python, Mojo, Odin
 
 TOKEN = DataGraph(
     "Token",
@@ -56,12 +56,15 @@ TOKEN = DataGraph(
         "keyId"     >> t.utf8,               # optional key id, for rotation
         "signature" >> t.data >> required,   # MAC / signature over (rootOffset, body)
     ]),
+    # A token is minted once and never mutated — model the arena as append-only
+    # (no delete()/is_valid(), no generation tracking; refs collapse to a bare index).
+    # Runtime-only: the wire bytes are identical, so this stays byte-for-byte compatible.
+    deletable=False,
 )
 
 # Targets = the languages that support BOTH the customizable header (spec 14) AND a
 # recursive union under a frozen+packed node: Swift, Rust, TypeScript, Python (Fork A),
-# and Mojo. See README "Language coverage" for why the rest are out:
-#   • Odin          — graph serde is at an early increment (no unions / frozen+packed / header)
+# Mojo, and Odin. See README "Language coverage" for why the rest are out:
 #   • Kotlin / Zig  — no customizable header yet
 library = Library(
     "dagr-web-token",
@@ -72,6 +75,7 @@ library = Library(
         TypeScript(out="gen/typescript"),
         Python(out="gen/python"),
         Mojo(out="gen/mojo"),
+        Odin(out="gen/odin"),
     ],
     wire_format_version=1,
 )

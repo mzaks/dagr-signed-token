@@ -33,6 +33,11 @@ pixi run --manifest-path "$MOJO_PIXI" mojo build -I "$ROOT/gen/mojo" \
   "$ROOT/examples/mojo/main.mojo" -o "$ROOT/examples/mojo/dwt-mojo"
 MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dwt-mojo")
 
+echo "== [build] Odin =="
+# The example package imports the generated gen/odin package + its runtime sub-package.
+odin build examples/odin -out:examples/odin/dwt-odin
+ODIN=(./examples/odin/dwt-odin)
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -42,13 +47,15 @@ emit_swift()  { "${SWIFT[@]}"  emit   "$1"; }
 emit_ts()     { "${TS[@]}"     emit   "$1"; }
 emit_python() { "${PYTHON[@]}" emit   "$1"; }
 emit_mojo()   { "${MOJO[@]}"   emit   "$1"; }
+emit_odin()   { "${ODIN[@]}"   emit   "$1"; }
 verify_rust()   { "${RUST[@]}"   verify "$1"; }
 verify_swift()  { "${SWIFT[@]}"  verify "$1"; }
 verify_ts()     { "${TS[@]}"     verify "$1"; }
 verify_python() { "${PYTHON[@]}" verify "$1"; }
 verify_mojo()   { "${MOJO[@]}"   verify "$1"; }
+verify_odin()   { "${ODIN[@]}"   verify "$1"; }
 
-LANGS=(rust swift ts python mojo)
+LANGS=(rust swift ts python mojo odin)
 
 echo
 echo "== [emit] each language mints its token =="

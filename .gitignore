@@ -6,6 +6,7 @@ target/
 node_modules/
 examples/swift/dwt-swift
 examples/mojo/dwt-mojo
+examples/odin/dwt-odin
 __mojocache__/
 *.bin
 
