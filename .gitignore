@@ -5,6 +5,8 @@ gen/
 target/
 node_modules/
 examples/swift/dwt-swift
+examples/mojo/dwt-mojo
+__mojocache__/
 *.bin
 
 # Python / editor

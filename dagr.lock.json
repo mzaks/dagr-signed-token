@@ -253,6 +253,25 @@
   },
   "library_hash": "sha256:f3c7cfa4e2ecf27d249ea08d87bbf8b3c7050f5bb6c83a03f6bbf1b5aa5813d5",
   "outputs": {
+    "gen/mojo/dagr_reader.mojo": "sha256:e171aad797fbfe73016190e067ef8d5540364b773a79318d3b9d41ba108ef3fe",
+    "gen/mojo/dagr_writer.mojo": "sha256:e33c5f8e0df3685f12b83bd70c1110809fc750613aac0748339a1f39033e7a63",
+    "gen/mojo/token_arena.mojo": "sha256:4d61b82e64e3b9446f3135eb4240583e63432f2a5caa26a1be2650238330e8ce",
+    "gen/mojo/token_reader.mojo": "sha256:f5b0db986438fe7f4768624439fdcb7f784a31581c3c423210a2e65b2eaba2d9",
+    "gen/mojo/token_restore.mojo": "sha256:f84bc5a439ac1de58e256efbef7153d33086bb80ecc5682aeb0e1aeaf0a4c41c",
+    "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
+    "gen/python/dagr_codegen_shared.py": "sha256:628172e0105d48d21395ccc09e1a0ee269f75bac5bb24d62a9c83d61b910b90d",
+    "gen/python/dagr_config.py": "sha256:bd96ecf0826d4ef1947f85a4cbd9ac3a6789a3d8ee2798229c6e80114b8bc3a2",
+    "gen/python/dagr_dsl.py": "sha256:9adeb89bafcd96aebcc4bade5a2e723f01ead04b32d82034dadd121202e0f85c",
+    "gen/python/dagr_py/__init__.py": "sha256:532e808d58d2c2cf33718d967a10cb2a6cf89cd695300a841080ddc01b9e0eb8",
+    "gen/python/dagr_py/dagr_defaults.py": "sha256:c6ea40616f86a1f23dbdfa69ed6c95b2b66b31d1b5a6cfd07646aedc58982925",
+    "gen/python/dagr_py/dagr_model.py": "sha256:b222cde7de4782490e9e45c28dec08d4e15713c86435b01a744948914b3e9407",
+    "gen/python/dagr_py/dagr_reader.py": "sha256:a5227d9a8b1ba003261d9f70360fd0d3c0406d4c256c1fb6d8f915bc03f22dcb",
+    "gen/python/dagr_py/dagr_restore.py": "sha256:083c7fd115bf2e504b0af3aea2e238b5ab4fc3e745fab904eab7f67d40f29bd6",
+    "gen/python/dagr_py/dagr_serialize.py": "sha256:11c75e9b7c4690d51dcd75e56064c5210e4c576679bfc2c6f883024cf671ebdd",
+    "gen/python/dagr_py/dagr_typed.py": "sha256:632f0bdaf2dce51d81b7e897fc983ee68f44a917362ac3c238a3ba5b56530d50",
+    "gen/python/dagr_py/dagr_writer.py": "sha256:79d0d13988aa3fe84ebddd22fede889c2852b3f8e3574745199f324530cf928f",
+    "gen/python/dagr_schema.py": "sha256:6526a3d33454d0be629da5fbb0e527975dd48aea15a6d003872821b3d5cc5e7f",
+    "gen/python/token.py": "sha256:d6ac02cc7f5e486678514dfeefefb93a53df31aa015f6eecb93d62e15fbbcd44",
     "gen/rust/Cargo.toml": "sha256:9aeb182fe7033184b0165c50fd292d8593af894f23e3e294ebaea5a0634d93e2",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
     "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
@@ -268,7 +287,7 @@
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-02T14:00:02.280717+00:00",
+    "generated_at": "2026-09-02T14:50:32.629374+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },
@@ -293,6 +312,20 @@
       "lang": "typescript",
       "layout": null,
       "out": "gen/typescript",
+      "package": null
+    },
+    {
+      "features": [],
+      "lang": "python",
+      "layout": null,
+      "out": "gen/python",
+      "package": null
+    },
+    {
+      "features": [],
+      "lang": "mojo",
+      "layout": null,
+      "out": "gen/mojo",
       "package": null
     }
   ]
