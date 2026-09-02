@@ -1,0 +1,299 @@
+{
+  "library": {
+    "graphs": {
+      "Token": {
+        "header": {
+          "fields": [
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "algorithm",
+              "options": 1,
+              "timestamp": null,
+              "type": {
+                "kind": "utf8"
+              }
+            },
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "keyId",
+              "options": 0,
+              "timestamp": null,
+              "type": {
+                "kind": "utf8"
+              }
+            },
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "signature",
+              "options": 1,
+              "timestamp": null,
+              "type": {
+                "kind": "data"
+              }
+            }
+          ],
+          "frozen": false,
+          "kind": "node",
+          "name": "Jws",
+          "packed": false,
+          "prefabs": {}
+        },
+        "imports": [],
+        "name": "Token",
+        "node_types": [
+          {
+            "fields": [
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "subject",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "issuer",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "audience",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "issuedAt",
+                "options": 1,
+                "timestamp": {
+                  "epoch": "unix",
+                  "unit": "s"
+                },
+                "type": {
+                  "kind": "u64"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "expiresAt",
+                "options": 1,
+                "timestamp": {
+                  "epoch": "unix",
+                  "unit": "s"
+                },
+                "type": {
+                  "kind": "u64"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "scopes",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "inner": {
+                    "kind": "utf8"
+                  },
+                  "kind": "array"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "custom",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "ref",
+                  "ref": "Json"
+                }
+              }
+            ],
+            "frozen": true,
+            "kind": "node",
+            "name": "Claims",
+            "packed": true,
+            "prefabs": {}
+          },
+          {
+            "fields": [
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "key",
+                "options": 1,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "value",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "ref",
+                  "ref": "Json"
+                }
+              }
+            ],
+            "frozen": true,
+            "kind": "node",
+            "name": "JsonMember",
+            "packed": true,
+            "prefabs": {}
+          },
+          {
+            "capacity": 16,
+            "kind": "union",
+            "name": "Json",
+            "types": [
+              {
+                "name": "string",
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "name": "number",
+                "type": {
+                  "kind": "f64"
+                }
+              },
+              {
+                "name": "bool",
+                "type": {
+                  "kind": "bool"
+                }
+              },
+              {
+                "name": "array",
+                "type": {
+                  "inner": {
+                    "kind": "ref",
+                    "ref": "Json"
+                  },
+                  "kind": "arrayWithOptionals"
+                }
+              },
+              {
+                "name": "object",
+                "type": {
+                  "inner": {
+                    "kind": "ref",
+                    "ref": "JsonMember"
+                  },
+                  "kind": "array"
+                }
+              }
+            ]
+          }
+        ],
+        "root_type": {
+          "kind": "ref",
+          "ref": "Claims"
+        }
+      }
+    },
+    "ir_version": 1,
+    "name": "dagr-web-token",
+    "schemas": [
+      {
+        "kind": "graph",
+        "name": "Token"
+      }
+    ],
+    "shared_buffers": {},
+    "sinks": {},
+    "wire_format_version": 1
+  },
+  "library_hash": "sha256:f3c7cfa4e2ecf27d249ea08d87bbf8b3c7050f5bb6c83a03f6bbf1b5aa5813d5",
+  "outputs": {
+    "gen/rust/Cargo.toml": "sha256:9aeb182fe7033184b0165c50fd292d8593af894f23e3e294ebaea5a0634d93e2",
+    "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
+    "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
+    "gen/rust/src/token.rs": "sha256:7f0c1b2354135d274ab2a64f0732d439d9cf99e0ae858ed9f376175b6fa1a91a",
+    "gen/swift/Package.swift": "sha256:9c56f04a5e5fb418f2150c72df7692eb9adb495690ec9c70adf78c805f436060",
+    "gen/swift/Sources/dagr_web_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
+    "gen/swift/Sources/dagr_web_token/Token.swift": "sha256:3a49bc9d6b26f56b6ff32ca4fab406ab082690feda993634216772b52eee73dd",
+    "gen/typescript/Token.ts": "sha256:f7598e38d4230cd59af9e51c5ba4805f9b323721bd35df7577833bbcaa325133",
+    "gen/typescript/Token_arena.ts": "sha256:7c90f65d33abc95e7863a191383cb801d1b3d510c26e5914682c8719c92c46d1",
+    "gen/typescript/Token_serde.ts": "sha256:924272dbc66662c122ebabc06572edd9888d307b050bc0996c05794e56c0f59d",
+    "gen/typescript/dagr_reader.ts": "sha256:24321476adefbb920e3ae8789eeffcae5c43b306cafb4e524ff95cf37bcb4431",
+    "gen/typescript/dagr_writer.ts": "sha256:62412424704d1ced9b195fa22f1643f5bd1c7bba0a6f9b203c44905a67c3f328"
+  },
+  "provenance": {
+    "command": "dagr build",
+    "generated_at": "2026-09-02T14:00:02.280717+00:00",
+    "host": "Mac.fritz.box",
+    "tool_version": "dagr 0.1.0"
+  },
+  "receipt_version": 1,
+  "targets": [
+    {
+      "features": [],
+      "lang": "swift",
+      "layout": "package",
+      "out": "gen/swift",
+      "package": null
+    },
+    {
+      "features": [],
+      "lang": "rust",
+      "layout": "crate",
+      "out": "gen/rust",
+      "package": null
+    },
+    {
+      "features": [],
+      "lang": "typescript",
+      "layout": null,
+      "out": "gen/typescript",
+      "package": null
+    }
+  ]
+}
