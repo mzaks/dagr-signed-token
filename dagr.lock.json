@@ -274,7 +274,7 @@
     "gen/python/dagr_py/dagr_typed.py": "sha256:632f0bdaf2dce51d81b7e897fc983ee68f44a917362ac3c238a3ba5b56530d50",
     "gen/python/dagr_py/dagr_writer.py": "sha256:79d0d13988aa3fe84ebddd22fede889c2852b3f8e3574745199f324530cf928f",
     "gen/python/dagr_schema.py": "sha256:d2d5b803446e49dfd472e22553b7306fc871fa1edd2bc466b4dbee44877208c4",
-    "gen/python/token.py": "sha256:d6ac02cc7f5e486678514dfeefefb93a53df31aa015f6eecb93d62e15fbbcd44",
+    "gen/python/token.py": "sha256:a83860de446941521690e95f5e689db5ab228be0cfa1fc211e87de101dcad801",
     "gen/rust/Cargo.toml": "sha256:507b872841fcf59161d32c015bf1ede73a0f6116c1dc72a6efdd5559c0076e42",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
     "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
@@ -290,7 +290,7 @@
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-03T09:12:06.972487+00:00",
+    "generated_at": "2026-09-03T09:34:23.848971+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },
