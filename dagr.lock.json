@@ -256,6 +256,7 @@
     "gen/mojo/dagr_reader.mojo": "sha256:e171aad797fbfe73016190e067ef8d5540364b773a79318d3b9d41ba108ef3fe",
     "gen/mojo/dagr_writer.mojo": "sha256:e33c5f8e0df3685f12b83bd70c1110809fc750613aac0748339a1f39033e7a63",
     "gen/mojo/token_arena.mojo": "sha256:26b6674969dd07a702943ac7e691978c8ac3e2042a1badc9f539e15a25dac534",
+    "gen/mojo/token_direct.mojo": "sha256:f1ea99b23224e990e0ef33e3231ff3bc98162a0e699f3a040721d570f158da47",
     "gen/mojo/token_reader.mojo": "sha256:f5b0db986438fe7f4768624439fdcb7f784a31581c3c423210a2e65b2eaba2d9",
     "gen/mojo/token_restore.mojo": "sha256:f84bc5a439ac1de58e256efbef7153d33086bb80ecc5682aeb0e1aeaf0a4c41c",
     "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
@@ -273,38 +274,45 @@
     "gen/python/dagr_py/dagr_serialize.py": "sha256:11c75e9b7c4690d51dcd75e56064c5210e4c576679bfc2c6f883024cf671ebdd",
     "gen/python/dagr_py/dagr_typed.py": "sha256:632f0bdaf2dce51d81b7e897fc983ee68f44a917362ac3c238a3ba5b56530d50",
     "gen/python/dagr_py/dagr_writer.py": "sha256:79d0d13988aa3fe84ebddd22fede889c2852b3f8e3574745199f324530cf928f",
-    "gen/python/dagr_schema.py": "sha256:d2d5b803446e49dfd472e22553b7306fc871fa1edd2bc466b4dbee44877208c4",
+    "gen/python/dagr_schema.py": "sha256:dc781e195c65c38925b56614a684f1c884c7ab02c7ad535c53e934a3792eb463",
     "gen/python/token.py": "sha256:a83860de446941521690e95f5e689db5ab228be0cfa1fc211e87de101dcad801",
     "gen/rust/Cargo.toml": "sha256:507b872841fcf59161d32c015bf1ede73a0f6116c1dc72a6efdd5559c0076e42",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
-    "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
-    "gen/rust/src/token.rs": "sha256:5e253a617b0235aac10cda9c51962fd085c79c598d88f758543724ddc7ba8b12",
+    "gen/rust/src/lib.rs": "sha256:b40f6e7aad85822897abd59a6f9d0113e5e41d3a4a785ba579b09eccffc1f42f",
+    "gen/rust/src/token.rs": "sha256:abb2f0da4d7b198547cd0343efd9b63a0c7e380a51aed78d542773ce7e7ecacb",
+    "gen/rust/src/token_lazy.rs": "sha256:041e5f6703abe9e822a00125d3c42e27b358104e5e9d2a6ec0b402e4222bb568",
     "gen/swift/Package.swift": "sha256:0193e79d425bb4d8b7c087923099d91e78fa562d211a5d01c8de2493e5e53a2f",
     "gen/swift/Sources/dagr_signed_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
-    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:fb83efd9643bbafc9175d677eea54a6eb0bc904001c7792ef8e0f1996302d7cf",
+    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:0b04086e8ee54bf7fd71bf69b4c24e2d4535d3f32cfe8b0528c52b5843039413",
+    "gen/swift/Sources/dagr_signed_token/TokenLazy.swift": "sha256:358653471acada0222d271026efb3af5f8e8c88b569fa0a81e2d005eb57a8707",
     "gen/typescript/Token.ts": "sha256:f7598e38d4230cd59af9e51c5ba4805f9b323721bd35df7577833bbcaa325133",
     "gen/typescript/Token_arena.ts": "sha256:5a19259642354317d25a8ac7790ed31fc9eba4af9e5758b6e8044c6fc9cc117a",
+    "gen/typescript/Token_direct.ts": "sha256:2d8762af2720e5983704272c56db6985664424309a665b1ba6921305d0c071cd",
     "gen/typescript/Token_serde.ts": "sha256:924272dbc66662c122ebabc06572edd9888d307b050bc0996c05794e56c0f59d",
     "gen/typescript/dagr_reader.ts": "sha256:24321476adefbb920e3ae8789eeffcae5c43b306cafb4e524ff95cf37bcb4431",
     "gen/typescript/dagr_writer.ts": "sha256:62412424704d1ced9b195fa22f1643f5bd1c7bba0a6f9b203c44905a67c3f328"
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-03T09:34:23.848971+00:00",
+    "generated_at": "2026-09-03T15:13:37.031894+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },
   "receipt_version": 1,
   "targets": [
     {
-      "features": [],
+      "features": [
+        "lazy"
+      ],
       "lang": "swift",
       "layout": "package",
       "out": "gen/swift",
       "package": null
     },
     {
-      "features": [],
+      "features": [
+        "lazy"
+      ],
       "lang": "rust",
       "layout": "crate",
       "out": "gen/rust",

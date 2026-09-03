@@ -10,6 +10,7 @@ mod sha256;
 
 use dagr_signed_token::dagr_runtime::DagrError;
 use dagr_signed_token::token::{Json, Jws, TokenArena, TokenGraph};
+use dagr_signed_token::token_lazy::{self, JsonPackedArrayAccessor};
 use sha256::{ct_eq, hmac_sha256};
 
 const SECRET: &[u8] = b"dagr-signed-token-demo-secret-2026";
@@ -53,6 +54,52 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     .expect("mint")
 }
 
+/// Direct Graph Builder ("31 Direct Graph Builder.md"): mint the SAME token from a
+/// plain value tree, arena-free. Must be byte-identical to `mint` — see the
+/// `direct_equals_arena` test below (spec §6 gate). Exercised only by that test, so
+/// it reads as dead code in the CLI (non-test) build.
+#[cfg_attr(not(test), allow(dead_code))]
+fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
+    use dagr_signed_token::token::{direct, Token};
+    // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
+    let custom = direct::Json::Object(vec![
+        direct::JsonMember { key: "tenant".into(), value: Some(direct::Json::String("acme".into())) },
+        direct::JsonMember { key: "roles".into(), value: Some(direct::Json::Array(vec![
+            Some(Box::new(direct::Json::String("admin".into()))),
+            Some(Box::new(direct::Json::String("billing".into()))),
+        ])) },
+        direct::JsonMember { key: "mfa".into(), value: Some(direct::Json::Bool(true)) },
+    ]);
+    let claims = direct::Claims {
+        subject: Some("user-42".into()),
+        issuer: Some("https://issuer.dagr.one".into()),
+        audience: Some("dagr-api".into()),
+        issued_at: NOW,
+        expires_at: exp,
+        scopes: vec!["read:profile".into(), "write:posts".into()],
+        custom: Some(custom),
+    };
+    Token::to_bytes_with_header(&claims, |root_offset, body| Jws {
+        algorithm: alg.into(),
+        keyId: Some(KID.into()),
+        signature: hmac_sha256(secret, &preimage(root_offset, body)).to_vec(),
+    })
+    .expect("mint direct")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn direct_equals_arena() {
+        // Spec 31 §6: the arena-free direct builder is byte-for-byte identical.
+        let a = mint(SECRET, "HS256", EXP);
+        let d = mint_direct(SECRET, "HS256", EXP);
+        assert_eq!(a, d, "direct builder diverged from arena ({} vs {} bytes)", a.len(), d.len());
+        assert_eq!(d.len(), 196, "expected the 196-byte reference token");
+    }
+}
+
 #[derive(Debug)]
 enum Rejected { BadAlg, BadSignature, Expired, WrongAudience }
 impl Rejected {
@@ -64,38 +111,49 @@ impl Rejected {
     }
 }
 
-fn verify(token: &[u8], secret: &[u8], now: u64) -> Result<TokenArena<0>, Rejected> {
+// Verify-before-parse, then read claims with ZERO-ALLOC LAZY ACCESSORS — no arena restore.
+// `read_root_with_header` runs the crypto GATE (below) before returning a `ClaimsAccessor`
+// that reads fields straight off the token buffer on demand.
+fn verify(token: &[u8], secret: &[u8], now: u64) -> Result<(), Rejected> {
     let reason = std::cell::Cell::new(None);
-    let decoded = TokenArena::<0>::from_bytes_with_header(token, |h, root_offset, body| {
+    let root = token_lazy::read_root_with_header(token, |h, root_offset, body| {
         if h.algorithm != "HS256" { reason.set(Some(Rejected::BadAlg)); return Err(DagrError::InvalidData); }
         let expected = hmac_sha256(secret, &preimage(root_offset, body));
         if !ct_eq(&h.signature, &expected) { reason.set(Some(Rejected::BadSignature)); return Err(DagrError::InvalidData); }
         Ok(())
     });
-    let arena = match decoded { Ok(a) => a, Err(_) => return Err(reason.take().unwrap_or(Rejected::BadSignature)) };
-    let c = arena.get_root().expect("root");
-    if now >= c.expires_at() { return Err(Rejected::Expired); }
-    if c.audience().as_deref() != Some("dagr-api") { return Err(Rejected::WrongAudience); }
-    Ok(arena)
+    let c = match root { Ok(c) => c, Err(_) => return Err(reason.take().unwrap_or(Rejected::BadSignature)) };
+    // Post-decode claim checks — lazy reads, still no owned graph.
+    if now >= c.expires_at().map_err(|_| Rejected::Expired)? { return Err(Rejected::Expired); }
+    if c.audience() != Some("dagr-api") { return Err(Rejected::WrongAudience); }
+    Ok(())
 }
 
-fn json_str<G: TokenGraph>(j: &Json<G>) -> String {
+// Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
+fn json_str_lazy(j: &JsonPackedArrayAccessor) -> String {
     match j {
-        Json::String(s) => format!("{:?}", s),
-        Json::Number(n) => format!("{}", n),
-        Json::Bool(b) => format!("{}", b),
-        Json::Array(a) => format!("[{}]", a.iter().map(|e| e.as_ref().map(json_str).unwrap_or_else(|| "null".into())).collect::<Vec<_>>().join(",")),
-        Json::Object(o) => format!("{{{}}}", o.iter().map(|m| format!("{:?}:{}", m.key(), m.value().map(|v| json_str(&v)).unwrap_or_else(|| "null".into()))).collect::<Vec<_>>().join(",")),
-        Json::Unknown(_) => "?".into(),
+        JsonPackedArrayAccessor::String(s) => format!("{:?}", s.as_deref().unwrap_or("")),
+        JsonPackedArrayAccessor::Number(n) => format!("{}", n),
+        JsonPackedArrayAccessor::Bool(b) => format!("{}", b),
+        JsonPackedArrayAccessor::Array(a) => format!("[{}]",
+            a.iter().map(|e| e.ok().flatten().map(|v| json_str_lazy(&v)).unwrap_or_else(|| "null".into()))
+                .collect::<Vec<_>>().join(",")),
+        JsonPackedArrayAccessor::Object(o) => format!("{{{}}}",
+            o.iter().map(|m| m.map(|m| format!("{:?}:{}", m.key().unwrap_or(""),
+                m.value().map(|v| json_str_lazy(&v)).unwrap_or_else(|| "null".into()))).unwrap_or_default())
+                .collect::<Vec<_>>().join(",")),
+        JsonPackedArrayAccessor::Unknown(_) => "?".into(),
     }
 }
 
-fn report(label: &str, r: &Result<TokenArena<0>, Rejected>) {
+fn report(label: &str, token: &[u8], r: &Result<(), Rejected>) {
     match r {
-        Ok(a) => {
-            let c = a.get_root().unwrap();
+        Ok(()) => {
+            // Already verified — re-open lazily (no-op gate) purely to render; still arena-free.
+            let c = token_lazy::read_root_with_header(token, |_, _, _| Ok(())).expect("root");
             println!("  {label:<20} ACCEPT  sub={:?} custom={}",
-                     c.subject().unwrap_or_default(), c.custom().map(|j| json_str(&j)).unwrap_or_else(|| "-".into()));
+                     c.subject().unwrap_or_default(),
+                     c.custom().map(|j| json_str_lazy(&j)).unwrap_or_else(|| "-".into()));
         }
         Err(e) => println!("  {label:<20} REJECT  [{}] {:?}", e.stage(), e),
     }
@@ -118,7 +176,7 @@ fn main() {
         Some("verify") => {
             let data = std::fs::read(&args[2]).expect("read");
             let r = verify(&data, SECRET, NOW);
-            report(&format!("[rust] {}", args[2]), &r);
+            report(&format!("[rust] {}", args[2]), &data, &r);
             std::process::exit(if r.is_ok() { 0 } else { 1 });
         }
         _ => {}
@@ -128,12 +186,14 @@ fn main() {
     let token = mint(SECRET, "HS256", EXP);
     println!("Minted token: {} bytes\n", token.len());
     println!("Verification:");
-    report("valid token", &verify(&token, SECRET, NOW));
+    report("valid token", &token, &verify(&token, SECRET, NOW));
     let mut tampered = token.clone();
     let bs = body_start(&tampered);
     tampered[bs] ^= 0x01;
-    report("tampered body", &verify(&tampered, SECRET, NOW));
-    report("wrong key", &verify(&token, b"not-the-secret", NOW));
-    report("alg:none token", &verify(&mint(SECRET, "none", EXP), SECRET, NOW));
-    report("expired token", &verify(&mint(SECRET, "HS256", NOW - 1), SECRET, NOW));
+    report("tampered body", &tampered, &verify(&tampered, SECRET, NOW));
+    report("wrong key", &token, &verify(&token, b"not-the-secret", NOW));
+    let none_tok = mint(SECRET, "none", EXP);
+    report("alg:none token", &none_tok, &verify(&none_tok, SECRET, NOW));
+    let expired_tok = mint(SECRET, "HS256", NOW - 1);
+    report("expired token", &expired_tok, &verify(&expired_tok, SECRET, NOW));
 }

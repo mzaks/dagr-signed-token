@@ -52,25 +52,29 @@ header_fn :: proc(ctx: rawptr, root_offset: int, body: []u8) -> tok.Jws_Value {
 // Mint via the reusable direct-graph-builder Writer (spec 31 §4.3): no arena — the claims
 // are a value tree handed straight to the writer, which reuses one builder across mints.
 mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []u8 {
-	// custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
-	custom := tok.Json_Value{
-		tag = .object,
-		object = []tok.JsonMember_Value{
-			{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},
-			{key = "roles", value = tok.Json_Value{tag = .array, array = []Maybe(tok.Json_Value){
-				tok.Json_Value{tag = .string, string = "admin"},
-				tok.Json_Value{tag = .string, string = "billing"},
-			}}},
-			{key = "mfa", value = tok.Json_Value{tag = .bool, bool = true}},
-		},
+	// custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }.
+	// NOTE: hoist every nested slice literal into a named var — an Odin compound-literal
+	// `[]T{...}` used inline in a larger expression is a temporary whose backing array
+	// does not outlive the statement, so a nested one would dangle before the writer walks
+	// it. Named vars live for this proc's scope (the whole `to_bytes_with_header` call).
+	roles := []Maybe(tok.Json_Value){
+		tok.Json_Value{tag = .string, string = "admin"},
+		tok.Json_Value{tag = .string, string = "billing"},
 	}
+	members := []tok.JsonMember_Value{
+		{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},
+		{key = "roles", value = tok.Json_Value{tag = .array, array = roles}},
+		{key = "mfa", value = tok.Json_Value{tag = .bool, bool = true}},
+	}
+	custom := tok.Json_Value{tag = .object, object = members}
+	scopes := []string{"read:profile", "write:posts"}
 	claims := tok.Claims_Value{
 		subject    = "user-42",
 		issuer     = "https://issuer.dagr.one",
 		audience   = "dagr-api",
 		issued_at  = NOW,
 		expires_at = exp,
-		scopes     = []string{"read:profile", "write:posts"},
+		scopes     = scopes,
 		custom     = custom,
 	}
 	ctx := Mint_Ctx{secret = secret, alg = alg}
@@ -91,43 +95,61 @@ gate :: proc(ctx: rawptr, h: tok.Jws_Value, root_offset: int, body: []u8) -> boo
 	return true
 }
 
-Verdict :: struct { ok: bool, reason: string, stage: string, claims: tok.Claims_Value }
+Verdict :: struct { ok: bool, reason: string, stage: string, acc: tok.Claims_Accessor }
 
-verify :: proc(token: []u8, secret: string, now: u64) -> Verdict {
-	ctx := Verify_Ctx{secret = secret}
-	claims, ok := tok.claims_from_bytes_with_header(token, &ctx, gate)
-	if !ok { return {ok = false, reason = ctx.reason, stage = "GATE (verify-before-parse)"} }
-	if now >= claims.expires_at {
-		return {ok = false, reason = "Expired", stage = "post-decode claim check", claims = claims}
-	}
-	if aud, has := claims.audience.?; !has || aud != "dagr-api" {
-		return {ok = false, reason = "WrongAudience", stage = "post-decode claim check", claims = claims}
-	}
-	return {ok = true, claims = claims}
+// Header-aware lazy root: run the crypto GATE (verify-before-parse), then return a
+// zero-copy `Claims_Accessor` rooted past the packed header — no eager restore. Mirrors
+// the generated `claims_from_bytes_with_header` framing, but hands back the accessor.
+lazy_root_with_header :: proc(data: []u8, ctx: rawptr,
+	gate: proc(ctx: rawptr, h: tok.Jws_Value, root_offset: int, body: []u8) -> bool,
+) -> (tok.Claims_Accessor, bool) {
+	framing, rl := dr.read_leb(data, 0)
+	if framing & 1 != 1 { return {}, false }
+	if (framing >> 1) & 1 != 0 { return {}, false }
+	stored_offset := int(framing >> 2)
+	hcs, hcsb := dr.read_leb(data, rl)
+	h := hcsb + int(hcs)
+	header := tok.restore_jws(tok.Jws_Accessor{buf = data, pos = rl})
+	body := data[rl + h:]
+	if !gate(ctx, header, stored_offset - h, body) { return {}, false }
+	return tok.Claims_Accessor{buf = data, pos = rl + stored_offset}, true
 }
 
-json_str :: proc(sb: ^strings.Builder, j: tok.Json_Value) {
-	switch j.tag {
-	case .string: fmt.sbprintf(sb, "%q", j.string.? or_else "")
-	case .number: fmt.sbprintf(sb, "%v", j.number.? or_else 0)
-	case .bool:   fmt.sbprintf(sb, "%v", j.bool.? or_else false)
+// Verify-before-parse, then read claims with ZERO-ALLOC LAZY ACCESSORS — no arena/restore.
+verify :: proc(token: []u8, secret: string, now: u64) -> Verdict {
+	ctx := Verify_Ctx{secret = secret}
+	acc, ok := lazy_root_with_header(token, &ctx, gate)
+	if !ok { return {ok = false, reason = ctx.reason, stage = "GATE (verify-before-parse)"} }
+	blk := tok.claims_block(acc)   // field positions parsed once; reused across reads
+	if now >= tok.claims_expires_at(acc, blk) {
+		return {ok = false, reason = "Expired", stage = "post-decode claim check", acc = acc}
+	}
+	if aud, has := tok.claims_audience(acc, blk).?; !has || aud != "dagr-api" {
+		return {ok = false, reason = "WrongAudience", stage = "post-decode claim check", acc = acc}
+	}
+	return {ok = true, acc = acc}
+}
+
+// Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
+json_str_lazy :: proc(sb: ^strings.Builder, j: tok.Json_PackedView) {
+	switch tok.json_packed_view_tag(j) {
+	case .string: fmt.sbprintf(sb, "%q", tok.json_packed_string(j))
+	case .number: fmt.sbprintf(sb, "%v", tok.json_packed_number(j))
+	case .bool:   fmt.sbprintf(sb, "%v", tok.json_packed_bool(j))
 	case .array:
 		strings.write_byte(sb, '[')
-		if arr, ok := j.array.?; ok {
-			for e, i in arr {
-				if i > 0 { strings.write_byte(sb, ',') }
-				if v, has := e.?; has { json_str(sb, v) } else { strings.write_string(sb, "null") }
-			}
+		for i in 0 ..< tok.json_packed_array_len(j) {
+			if i > 0 { strings.write_byte(sb, ',') }
+			if e, has := tok.json_packed_array_get(j, i).?; has { json_str_lazy(sb, e) } else { strings.write_string(sb, "null") }
 		}
 		strings.write_byte(sb, ']')
 	case .object:
 		strings.write_byte(sb, '{')
-		if obj, ok := j.object.?; ok {
-			for mem, i in obj {
-				if i > 0 { strings.write_byte(sb, ',') }
-				fmt.sbprintf(sb, "%q:", mem.key)
-				if v, has := mem.value.?; has { json_str(sb, v) } else { strings.write_string(sb, "null") }
-			}
+		for i in 0 ..< tok.json_packed_object_len(j) {
+			if i > 0 { strings.write_byte(sb, ',') }
+			m := tok.json_packed_object_get(j, i)
+			fmt.sbprintf(sb, "%q:", tok.json_member_key(m))
+			if v, has := tok.json_member_value(m).?; has { json_str_lazy(sb, v) } else { strings.write_string(sb, "null") }
 		}
 		strings.write_byte(sb, '}')
 	}
@@ -136,9 +158,9 @@ json_str :: proc(sb: ^strings.Builder, j: tok.Json_Value) {
 report :: proc(label: string, v: Verdict) {
 	if v.ok {
 		sb := strings.builder_make(); defer strings.builder_destroy(&sb)
-		if c, ok := v.claims.custom.?; ok { json_str(&sb, c) } else { strings.write_byte(&sb, '-') }
+		if c, ok := tok.claims_custom(v.acc).?; ok { json_str_lazy(&sb, c) } else { strings.write_byte(&sb, '-') }
 		fmt.printf("  %-22s ACCEPT  sub=%v custom=%v\n",
-			label, v.claims.subject.? or_else "-", strings.to_string(sb))
+			label, tok.claims_subject(v.acc).? or_else "-", strings.to_string(sb))
 	} else {
 		fmt.printf("  %-22s REJECT  [%s] %s\n", label, v.stage, v.reason)
 	}

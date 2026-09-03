@@ -8,9 +8,11 @@
 #   mojo run -I gen/mojo main.mojo verify PATH → verify+decode a token minted by any language
 from std.python import Python, PythonObject
 from std.sys import argv
-from token_arena import TokenArena, Claims, Json, JsonMember, JsonTag
+from std.memory import ArcPointer
+from token_arena import TokenArena
 from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header, read_claims_header
-from token_restore import restore_claims_graph
+from token_direct import DirectClaims, DirectJson, DirectJsonMember, serialize_claims_graph_direct, serialize_claims_graph_with_header_direct
+from token_reader import ClaimsAccessor, JsonPackedView
 from dagr_reader import read_leb
 
 comptime SECRET = "dagr-signed-token-demo-secret-2026"
@@ -79,25 +81,6 @@ def _push_leb(mut out: List[UInt8], value: UInt64):
         if v == 0:
             break
 
-# The strict `restore_claims_graph`/`root_offset` reject a header buffer by design
-# (a plain restore must not silently accept an enveloped buffer). Reframe to a
-# header-less `[LEB(rootOffset<<2)][body]` (the body is position-independent) and
-# restore that — the same trick TypeScript's fromBytesWithHeader uses.
-def _restore_header_buffer(buf: List[UInt8]) raises -> TokenArena:
-    var sp = Span(buf)
-    var fr = read_leb(sp, 0)
-    var stored_off = Int(fr[0] >> 2)
-    var flen = fr[1]
-    var hcs = read_leb(sp, flen)
-    var H = hcs[1] + Int(hcs[0])
-    var root_off = stored_off - H
-    var body = _tail(buf, flen + H)
-    var nb = List[UInt8]()
-    _push_leb(nb, UInt64(root_off) << 2)
-    for i in range(len(body)):
-        nb.append(body[i])
-    return restore_claims_graph(Span(nb))
-
 # ── Mint ───────────────────────────────────────────────────────────────────────
 def _build_arena(exp: UInt64) raises -> TokenArena:
     var a = TokenArena()
@@ -148,9 +131,9 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
         diff |= Int(hdr.signature[i] ^ expected[i])
     if diff != 0:
         return String("GATE (verify-before-parse)|BadSignature")
-    # Post-decode over the now-trusted body.
-    var a = _restore_header_buffer(buf)
-    var c = a.root().value()
+    # Post-decode over the now-trusted body — ZERO-ALLOC LAZY ACCESSOR, no arena restore.
+    # The root sits at `flen + stored_off` (past the framing word + packed header, §14 §4).
+    var c = ClaimsAccessor(Span(buf), flen + stored_off)
     if now >= c.expiresAt():
         return String("post-decode claim check|Expired")
     var aud = c.audience()
@@ -158,47 +141,97 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
         return String("post-decode claim check|WrongAudience")
     return String("")
 
-def _json_str(j: Json) raises -> String:
+# Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
+def _json_str_lazy[o: ImmOrigin](j: JsonPackedView[o]) raises -> String:
     var t = j.tag()
-    if t == JsonTag.string:
+    if t == 0:
         return String('"') + j.string() + String('"')
-    if t == JsonTag.number:
+    if t == 1:
         return String(j.number())
-    if t == JsonTag.bool:
+    if t == 2:
         return String("true") if j.bool() else String("false")
-    if t == JsonTag.array:
+    if t == 3:
         var s = String("[")
         var arr = j.array()
         for i in range(len(arr)):
             if i > 0: s += String(",")
-            if arr[i]: s += _json_str(arr[i].value())
+            var e = arr.get(i)
+            if e: s += _json_str_lazy(e.value())
             else: s += String("null")
         return s + String("]")
-    if t == JsonTag.object:
+    if t == 4:
         var s = String("{")
         var obj = j.object()
         for i in range(len(obj)):
             if i > 0: s += String(",")
-            s += String('"') + obj[i].key() + String('":') + _json_str(obj[i].value().value())
+            var m = obj.get(i)
+            var v = m.value()
+            s += String('"') + m.key() + String('":')
+            s += _json_str_lazy(v.value()) if v else String("null")
         return s + String("}")
     return String("?")
 
 def _report(label: String, buf: List[UInt8]) raises:
     var r = verify(buf, SECRET, NOW)
     if r == String(""):
-        var a = _restore_header_buffer(buf)
-        var c = a.root().value()
+        var fr = read_leb(Span(buf), 0)
+        var c = ClaimsAccessor(Span(buf), fr[1] + Int(fr[0] >> 2))
         var sub = c.subject()
         var subs = sub.value() if sub else String("-")
         var cus = c.custom()
-        var cs = _json_str(cus.value()) if cus else String("-")
+        var cs = _json_str_lazy(cus.value()) if cus else String("-")
         print("  " + label + "  ACCEPT  sub=\"" + subs + "\" custom=" + cs)
     else:
         var parts = r.split("|")
         print("  " + label + "  REJECT  [" + String(parts[0]) + "] " + String(parts[1]))
 
+# ── Direct Graph Builder ("31 Direct Graph Builder.md"): arena-free value tree in ──
+def _build_direct(exp: UInt64) raises -> DirectClaims:
+    var roles = DirectJson.array([
+        Optional(ArcPointer(DirectJson.string(String("admin")))),
+        Optional(ArcPointer(DirectJson.string(String("billing"))))])
+    var members = List[DirectJsonMember]()
+    members.append(DirectJsonMember(String("tenant"), Optional(ArcPointer(DirectJson.string(String("acme"))))))
+    members.append(DirectJsonMember(String("roles"), Optional(ArcPointer(roles^))))
+    members.append(DirectJsonMember(String("mfa"), Optional(ArcPointer(DirectJson.bool(True)))))
+    var custom = DirectJson.object(members^)
+    return DirectClaims(
+        Optional[String](String("user-42")),
+        Optional[String](String("https://issuer.dagr.one")),
+        Optional[String](String("dagr-api")),
+        NOW, exp,
+        [String("read:profile"), String("write:posts")],
+        Optional(ArcPointer(custom^)))
+
+def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
+    var n = _build_direct(exp)
+    var buf0 = serialize_claims_graph_direct(n.copy())
+    var fr = read_leb(Span(buf0), 0)
+    var root_off = Int(fr[0] >> 2)
+    var body = _tail(buf0, fr[1])
+    var sig = hmac_sha256(SECRET, preimage(root_off, body))
+    return serialize_claims_graph_with_header_direct(n^, Jws(alg, Optional[String](String(KID)), sig^))
+
 def main() raises:
     var args = argv()
+    if len(args) >= 2 and args[1] == "direct":
+        var a = mint(String("HS256"), EXP)
+        var d = mint_direct(String("HS256"), EXP)
+        var eq = len(a) == len(d)
+        if eq:
+            for i in range(len(a)):
+                if a[i] != d[i]:
+                    eq = False
+                    break
+        if eq:
+            print("[mojo] direct == arena (" + String(len(d)) + " bytes) — spec 31 gate OK")
+        else:
+            print("[mojo] direct != arena (arena " + String(len(a)) + " vs direct " + String(len(d)) + ")")
+            _write_file(String("/tmp/mojo_a.bin"), a)
+            _write_file(String("/tmp/mojo_d.bin"), d)
+            var sys = Python.import_module("sys")
+            _ = sys.exit(1)
+        return
     if len(args) >= 3 and args[1] == "emit":
         _write_file(String(args[2]), mint(String("HS256"), EXP))
         print("[mojo] emitted -> " + String(args[2]))

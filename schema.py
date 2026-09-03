@@ -70,8 +70,8 @@ library = Library(
     "dagr-signed-token",
     schemas=[TOKEN],
     targets=[
-        Swift(out="gen/swift"),
-        Rust(out="gen/rust"),
+        Swift(out="gen/swift", features=["lazy"]),
+        Rust(out="gen/rust", features=["lazy"]),
         TypeScript(out="gen/typescript"),
         Python(out="gen/python"),
         Mojo(out="gen/mojo"),

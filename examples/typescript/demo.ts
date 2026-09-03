@@ -6,7 +6,12 @@
 //   npx tsx demo.ts emit  PATH   → write a valid token
 //   npx tsx demo.ts verify PATH  → verify+decode a token minted by any language
 import { Arena, type Json } from "../../gen/typescript/Token_arena";
-import { toBytesWithHeader, fromBytesWithHeader, type Jws } from "../../gen/typescript/Token_serde";
+import { toBytesWithHeader, lazyRootWithHeader, type Jws } from "../../gen/typescript/Token_serde";
+import { type ClaimsAccessor, type JsonPackedView } from "../../gen/typescript/Token";
+import {
+  toBytesWithHeader as toBytesWithHeaderDirect,
+  type Claims as DirectClaims, type JsonValue,
+} from "../../gen/typescript/Token_direct";
 import { Buf, readLEB } from "../../gen/typescript/dagr_reader";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -44,31 +49,52 @@ function mint(alg: string, exp: bigint): Uint8Array {
   } satisfies Jws));
 }
 
+// Direct Graph Builder ("31 Direct Graph Builder.md"): mint the SAME token from a plain
+// value tree, arena-free. Must be byte-identical to `mint` (spec §6 gate).
+function mintDirect(alg: string, exp: bigint): Uint8Array {
+  const custom: JsonValue = { type: "object", value: [
+    { key: "tenant", value: { type: "string", value: "acme" } },
+    { key: "roles", value: { type: "array", value: [
+      { type: "string", value: "admin" }, { type: "string", value: "billing" }] } },
+    { key: "mfa", value: { type: "bool", value: true } },
+  ]};
+  const root: DirectClaims = {
+    subject: "user-42", issuer: "https://issuer.dagr.one", audience: "dagr-api",
+    issuedAt: NOW, expiresAt: exp, scopes: ["read:profile", "write:posts"], custom,
+  };
+  return toBytesWithHeaderDirect(root, (rootOffset, body) => ({
+    algorithm: alg, keyId: KID, signature: hmacSHA256(SECRET, preimage(rootOffset, body)),
+  } satisfies Jws));
+}
+
 type Verdict =
-  | { ok: true; arena: ReturnType<typeof fromBytesWithHeader> }
+  | { ok: true; acc: ClaimsAccessor }
   | { ok: false; reason: string; stage: string };
 
+// Verify-before-parse, then read claims with ZERO-ALLOC LAZY ACCESSORS — no arena restore.
+// `lazyRootWithHeader` runs the crypto GATE before returning a `ClaimsAccessor` that reads
+// fields straight off the token buffer on demand.
 function verify(token: Uint8Array, now: bigint, secret: Buffer): Verdict {
   let reason: string | null = null;
   let stage = "GATE (verify-before-parse)";
   try {
-    const arena = fromBytesWithHeader(token, (h, rootOffset, body) => {
+    const c = lazyRootWithHeader(token, (h, rootOffset, body) => {
       if (h.algorithm !== "HS256") { reason = "BadAlg"; throw new Error(reason); }
       const expected = Buffer.from(hmacSHA256(secret, preimage(rootOffset, body)));
       const got = Buffer.from(h.signature);
       if (got.length !== expected.length || !timingSafeEqual(got, expected)) { reason = "BadSignature"; throw new Error(reason); }
     });
     stage = "post-decode claim check";
-    const c = arena.root!;
     if (now >= c.expiresAt) return { ok: false, reason: "Expired", stage };
     if (c.audience !== "dagr-api") return { ok: false, reason: "WrongAudience", stage };
-    return { ok: true, arena };
+    return { ok: true, acc: c };
   } catch {
     return { ok: false, reason: reason ?? "BadSignature", stage };
   }
 }
 
-function jsonStr(j: Json | null): string {
+// Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
+function jsonStr(j: JsonPackedView | null): string {
   if (j === null) return "-";
   switch (j.type) {
     case "string": return JSON.stringify(j.value);
@@ -82,7 +108,7 @@ function jsonStr(j: Json | null): string {
 function report(label: string, v: Verdict): void {
   const tag = label.padEnd(22);
   if (v.ok) {
-    const c = v.arena.root!;
+    const c = v.acc;
     console.log(`  ${tag} ACCEPT  sub="${c.subject}" custom=${jsonStr(c.custom)}`);
   } else {
     console.log(`  ${tag} REJECT  [${v.stage}] ${v.reason}`);
@@ -90,7 +116,13 @@ function report(label: string, v: Verdict): void {
 }
 
 const [, , cmd, path] = process.argv;
-if (cmd === "emit" && path) {
+if (cmd === "direct") {
+  const a = mint("HS256", EXP);
+  const d = mintDirect("HS256", EXP);
+  const eq = a.length === d.length && a.every((x, i) => x === d[i]);
+  if (eq) { console.log(`[ts] direct == arena (${d.length} bytes) — spec 31 gate OK`); }
+  else { console.log(`[ts] direct != arena (arena ${a.length} vs direct ${d.length})`); process.exit(1); }
+} else if (cmd === "emit" && path) {
   writeFileSync(path, mint("HS256", EXP));
   console.log(`[ts] emitted -> ${path}`);
 } else if (cmd === "verify" && path) {
