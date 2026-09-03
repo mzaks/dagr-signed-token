@@ -49,7 +49,9 @@ header_fn :: proc(ctx: rawptr, root_offset: int, body: []u8) -> tok.Jws_Value {
 	}
 }
 
-mint :: proc(secret: string, alg: string, exp: u64) -> []u8 {
+// Mint via the reusable direct-graph-builder Writer (spec 31 §4.3): no arena — the claims
+// are a value tree handed straight to the writer, which reuses one builder across mints.
+mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []u8 {
 	// custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
 	custom := tok.Json_Value{
 		tag = .object,
@@ -72,7 +74,7 @@ mint :: proc(secret: string, alg: string, exp: u64) -> []u8 {
 		custom     = custom,
 	}
 	ctx := Mint_Ctx{secret = secret, alg = alg}
-	return tok.claims_to_bytes_with_header(claims, &ctx, header_fn)
+	return tok.claims_writer_to_bytes_with_header(w, claims, &ctx, header_fn)
 }
 
 Verify_Ctx :: struct { secret: string, reason: string }
@@ -151,8 +153,12 @@ body_start :: proc(data: []u8) -> int {
 
 main :: proc() {
 	args := os.args
+	// One reusable writer, arena-free (spec 31): the showcase mints several tokens through it.
+	w := tok.claims_writer_make()
+	defer tok.claims_writer_destroy(&w)
+
 	if len(args) >= 3 && args[1] == "emit" {
-		token := mint(SECRET, "HS256", EXP)
+		token := mint(&w, SECRET, "HS256", EXP)
 		if err := os.write_entire_file(args[2], token); err != nil { fmt.eprintln("write failed"); os.exit(2) }
 		fmt.printf("[odin] emitted -> %s\n", args[2])
 		return
@@ -166,7 +172,7 @@ main :: proc() {
 	}
 
 	fmt.println("== dagr-signed-token — Odin ==\n")
-	token := mint(SECRET, "HS256", EXP)
+	token := mint(&w, SECRET, "HS256", EXP)
 	fmt.printf("Minted token: %d bytes\n\n", len(token))
 	fmt.println("Verification:")
 	report("valid token", verify(token, SECRET, NOW))
@@ -175,6 +181,6 @@ main :: proc() {
 	tampered[body_start(tampered)] ~= 0x01
 	report("tampered body", verify(tampered, SECRET, NOW))
 	report("wrong key", verify(token, "not-the-secret", NOW))
-	report("alg:none token", verify(mint(SECRET, "none", EXP), SECRET, NOW))
-	report("expired token", verify(mint(SECRET, "HS256", NOW - 1), SECRET, NOW))
+	report("alg:none token", verify(mint(&w, SECRET, "none", EXP), SECRET, NOW))
+	report("expired token", verify(mint(&w, SECRET, "HS256", NOW - 1), SECRET, NOW))
 }

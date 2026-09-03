@@ -260,8 +260,8 @@
     "gen/mojo/token_restore.mojo": "sha256:f84bc5a439ac1de58e256efbef7153d33086bb80ecc5682aeb0e1aeaf0a4c41c",
     "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
     "gen/odin/runtime/dagr_reader.odin": "sha256:71ebce1e05f9cd4a17018b657fb2223ac325fc9bec9fc29521d22c78b78e39dd",
-    "gen/odin/runtime/dagr_writer.odin": "sha256:09342446007bdd1e4b510d0743409e3508d53a90a0cc0d57ac84737867616be8",
-    "gen/odin/token.odin": "sha256:045409df0180360c83440dcbaf506d6e8386bf5e1cd7f9ffff9b2b3e467dc3ab",
+    "gen/odin/runtime/dagr_writer.odin": "sha256:48da15ff238d25711754d81c6a172dac3653056d369236a8fb4a334e8e65bd1b",
+    "gen/odin/token.odin": "sha256:adf6caff0ed5edea51c59f7566ee6a4581af9d67cc769219c6e60f2d51637178",
     "gen/python/dagr_codegen_shared.py": "sha256:628172e0105d48d21395ccc09e1a0ee269f75bac5bb24d62a9c83d61b910b90d",
     "gen/python/dagr_config.py": "sha256:bd96ecf0826d4ef1947f85a4cbd9ac3a6789a3d8ee2798229c6e80114b8bc3a2",
     "gen/python/dagr_dsl.py": "sha256:9adeb89bafcd96aebcc4bade5a2e723f01ead04b32d82034dadd121202e0f85c",
@@ -290,7 +290,7 @@
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-03T08:29:49.532203+00:00",
+    "generated_at": "2026-09-03T09:12:06.972487+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },
