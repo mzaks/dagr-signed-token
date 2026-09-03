@@ -1,15 +1,15 @@
-// dagr-web-token — Swift example (see ../../CONTRACT.md). Compiled together with
-// the generated sources in gen/swift/Sources/dagr_web_token/ (see run_cross_lang.sh),
+// dagr-signed-token — Swift example (see ../../CONTRACT.md). Compiled together with
+// the generated sources in gen/swift/Sources/dagr_signed_token/ (see run_cross_lang.sh),
 // so the `Token` namespace is available directly.
 //
-// CLI:  dwt-swift            → showcase
-//       dwt-swift emit  PATH → write a valid token
-//       dwt-swift verify PATH → verify+decode a token minted by any language
+// CLI:  dst-swift            → showcase
+//       dst-swift emit  PATH → write a valid token
+//       dst-swift verify PATH → verify+decode a token minted by any language
 import Foundation
 
 enum B {}
 
-let SECRET = Data("dagr-web-token-demo-secret-2026".utf8)
+let SECRET = Data("dagr-signed-token-demo-secret-2026".utf8)
 let KID = "hmac-key-2026"
 let NOW: UInt64 = 1_760_000_000
 let EXP: UInt64 = NOW + 3600
@@ -104,7 +104,7 @@ do {
         report("[swift] \(args[2])", r)
         if case .failure = r { exit(1) }
     } else {
-        print("== dagr-web-token — Swift ==\n")
+        print("== dagr-signed-token — Swift ==\n")
         let token = try mint(secret: SECRET, alg: "HS256", exp: EXP)
         print("Minted token: \(token.count) bytes\n")
         print("Verification:")

@@ -240,7 +240,7 @@
       }
     },
     "ir_version": 1,
-    "name": "dagr-web-token",
+    "name": "dagr-signed-token",
     "schemas": [
       {
         "kind": "graph",
@@ -251,7 +251,7 @@
     "sinks": {},
     "wire_format_version": 1
   },
-  "library_hash": "sha256:f3c7cfa4e2ecf27d249ea08d87bbf8b3c7050f5bb6c83a03f6bbf1b5aa5813d5",
+  "library_hash": "sha256:57f99e3b28514198f1ed69d249b11f95f430c2ce39028df29d8130034544364b",
   "outputs": {
     "gen/mojo/dagr_reader.mojo": "sha256:e171aad797fbfe73016190e067ef8d5540364b773a79318d3b9d41ba108ef3fe",
     "gen/mojo/dagr_writer.mojo": "sha256:e33c5f8e0df3685f12b83bd70c1110809fc750613aac0748339a1f39033e7a63",
@@ -261,7 +261,7 @@
     "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
     "gen/odin/runtime/dagr_reader.odin": "sha256:71ebce1e05f9cd4a17018b657fb2223ac325fc9bec9fc29521d22c78b78e39dd",
     "gen/odin/runtime/dagr_writer.odin": "sha256:09342446007bdd1e4b510d0743409e3508d53a90a0cc0d57ac84737867616be8",
-    "gen/odin/token.odin": "sha256:209df1dcf73fcf3003af5abdd00352e86c63a0be9fe8c34ad08b03f5f5efd3ba",
+    "gen/odin/token.odin": "sha256:045409df0180360c83440dcbaf506d6e8386bf5e1cd7f9ffff9b2b3e467dc3ab",
     "gen/python/dagr_codegen_shared.py": "sha256:628172e0105d48d21395ccc09e1a0ee269f75bac5bb24d62a9c83d61b910b90d",
     "gen/python/dagr_config.py": "sha256:bd96ecf0826d4ef1947f85a4cbd9ac3a6789a3d8ee2798229c6e80114b8bc3a2",
     "gen/python/dagr_dsl.py": "sha256:9adeb89bafcd96aebcc4bade5a2e723f01ead04b32d82034dadd121202e0f85c",
@@ -273,15 +273,15 @@
     "gen/python/dagr_py/dagr_serialize.py": "sha256:11c75e9b7c4690d51dcd75e56064c5210e4c576679bfc2c6f883024cf671ebdd",
     "gen/python/dagr_py/dagr_typed.py": "sha256:632f0bdaf2dce51d81b7e897fc983ee68f44a917362ac3c238a3ba5b56530d50",
     "gen/python/dagr_py/dagr_writer.py": "sha256:79d0d13988aa3fe84ebddd22fede889c2852b3f8e3574745199f324530cf928f",
-    "gen/python/dagr_schema.py": "sha256:64a974296614239f01eef393835e0dfdfaf8352c4ecb0e4b90a0684297e3413e",
+    "gen/python/dagr_schema.py": "sha256:d2d5b803446e49dfd472e22553b7306fc871fa1edd2bc466b4dbee44877208c4",
     "gen/python/token.py": "sha256:d6ac02cc7f5e486678514dfeefefb93a53df31aa015f6eecb93d62e15fbbcd44",
-    "gen/rust/Cargo.toml": "sha256:9aeb182fe7033184b0165c50fd292d8593af894f23e3e294ebaea5a0634d93e2",
+    "gen/rust/Cargo.toml": "sha256:507b872841fcf59161d32c015bf1ede73a0f6116c1dc72a6efdd5559c0076e42",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
     "gen/rust/src/lib.rs": "sha256:7e6a060fa30eaf597f7946c3d753d89cca4be64fab921c7bb950c14e26002f8b",
     "gen/rust/src/token.rs": "sha256:5e253a617b0235aac10cda9c51962fd085c79c598d88f758543724ddc7ba8b12",
-    "gen/swift/Package.swift": "sha256:9c56f04a5e5fb418f2150c72df7692eb9adb495690ec9c70adf78c805f436060",
-    "gen/swift/Sources/dagr_web_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
-    "gen/swift/Sources/dagr_web_token/Token.swift": "sha256:fb83efd9643bbafc9175d677eea54a6eb0bc904001c7792ef8e0f1996302d7cf",
+    "gen/swift/Package.swift": "sha256:0193e79d425bb4d8b7c087923099d91e78fa562d211a5d01c8de2493e5e53a2f",
+    "gen/swift/Sources/dagr_signed_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
+    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:fb83efd9643bbafc9175d677eea54a6eb0bc904001c7792ef8e0f1996302d7cf",
     "gen/typescript/Token.ts": "sha256:f7598e38d4230cd59af9e51c5ba4805f9b323721bd35df7577833bbcaa325133",
     "gen/typescript/Token_arena.ts": "sha256:5a19259642354317d25a8ac7790ed31fc9eba4af9e5758b6e8044c6fc9cc117a",
     "gen/typescript/Token_serde.ts": "sha256:924272dbc66662c122ebabc06572edd9888d307b050bc0996c05794e56c0f59d",
@@ -290,7 +290,7 @@
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-02T17:11:11.641142+00:00",
+    "generated_at": "2026-09-03T08:29:49.532203+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },

@@ -1,14 +1,14 @@
 [workspace]
 authors = ["Maxim Zaks <maxim.zaks@googlemail.com>"]
 channels = ["https://conda.modular.com/max", "conda-forge"]
-name = "dwt-mojo"
+name = "dst-mojo"
 platforms = ["osx-arm64"]
 version = "0.1.0"
 
-# Self-contained Mojo toolchain for the dagr-web-token Mojo example, so the
+# Self-contained Mojo toolchain for the dagr-signed-token Mojo example, so the
 # cross-language runner doesn't reach into another project's pixi env. Build/run:
 #   pixi run --manifest-path examples/mojo/pixi.toml \
-#     mojo build -I gen/mojo examples/mojo/main.mojo -o examples/mojo/dwt-mojo
+#     mojo build -I gen/mojo examples/mojo/main.mojo -o examples/mojo/dst-mojo
 [tasks]
 
 [dependencies]

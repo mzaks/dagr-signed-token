@@ -1,4 +1,4 @@
-"""dagr-web-token — a JWT-shaped signed token, defined once, generated everywhere.
+"""dagr-signed-token — a JWT-shaped signed token, defined once, generated everywhere.
 
 A JWT is `header.payload.signature`: the signature is a MAC over the payload so a
 verifier can trust the claims *before* acting on them. This schema reproduces that
@@ -67,7 +67,7 @@ TOKEN = DataGraph(
 # Mojo, and Odin. See README "Language coverage" for why the rest are out:
 #   • Kotlin / Zig  — no customizable header yet
 library = Library(
-    "dagr-web-token",
+    "dagr-signed-token",
     schemas=[TOKEN],
     targets=[
         Swift(out="gen/swift"),

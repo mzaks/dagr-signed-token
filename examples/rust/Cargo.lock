@@ -3,12 +3,12 @@
 version = 4
 
 [[package]]
-name = "dagr_web_token"
+name = "dagr_signed_token"
 version = "0.1.0"
 
 [[package]]
-name = "dwt-rust-demo"
+name = "dst-rust-demo"
 version = "0.1.0"
 dependencies = [
- "dagr_web_token",
+ "dagr_signed_token",
 ]

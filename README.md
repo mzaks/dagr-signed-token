@@ -1,4 +1,4 @@
-# dagr-web-token
+# dagr-signed-token
 
 A **JWT-shaped signed token**, defined once as a [Dagr](https://dagr.one) schema
 and generated into **Swift, Rust, TypeScript, Python, Mojo, and Odin** — with a
@@ -9,7 +9,7 @@ A JWT is `header.payload.signature`: the signature is a MAC over the payload, so
 a verifier can trust the claims *before* acting on them. This reproduces that with
 Dagr's customizable header ("14 Customizable Header.md"), **Shape A**:
 
-| JWT | dagr-web-token |
+| JWT | dagr-signed-token |
 |---|---|
 | payload / claims | the graph **body** (`Claims`, `frozen+packed`) |
 | registered claims (`sub`/`iss`/`aud`/`iat`/`exp`) | typed `Claims` fields (all optional per RFC 7519 except a defensive `issuedAt`/`expiresAt`) |
@@ -62,8 +62,8 @@ dagr check        # later: diff the schema against the receipt (compatibility ga
 cargo run --manifest-path examples/rust/Cargo.toml
 
 # Swift
-swiftc -O gen/swift/Sources/dagr_web_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dwt-swift
-./examples/swift/dwt-swift
+swiftc -O gen/swift/Sources/dagr_signed_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dst-swift
+./examples/swift/dst-swift
 
 # TypeScript
 npx tsx examples/typescript/demo.ts
@@ -76,7 +76,7 @@ pixi run --manifest-path examples/mojo/pixi.toml \
   mojo run -I gen/mojo examples/mojo/main.mojo
 
 # Odin (HMAC via core:crypto/hmac)
-odin run examples/odin -out:examples/odin/dwt-odin
+odin run examples/odin -out:examples/odin/dst-odin
 ```
 
 Each prints the mint size and five verification outcomes:

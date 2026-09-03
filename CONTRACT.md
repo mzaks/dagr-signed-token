@@ -9,7 +9,7 @@ constants and rules below are the contract — keep them identical across
 
 | Name | Value |
 |---|---|
-| `SECRET` (HMAC key) | ASCII `dagr-web-token-demo-secret-2026` |
+| `SECRET` (HMAC key) | ASCII `dagr-signed-token-demo-secret-2026` |
 | `KID` | `hmac-key-2026` |
 | `NOW` (issuedAt) | `1760000000` (unix seconds) |
 | `EXP` (expiresAt) | `NOW + 3600` = `1760003600` |

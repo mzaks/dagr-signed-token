@@ -1,10 +1,10 @@
-// dagr-web-token — Odin example (see ../../CONTRACT.md). Built against the generated
+// dagr-signed-token — Odin example (see ../../CONTRACT.md). Built against the generated
 // package in gen/odin (the `tok` alias) and its runtime sub-package (the `dr` alias);
 // the crypto is Odin's core SHA-256 HMAC (constant-time verify).
 //
-// CLI:  dwt-odin            → showcase (mint, verify, tamper, alg:none, expiry)
-//       dwt-odin emit  PATH → write a valid token
-//       dwt-odin verify PATH → verify+decode a token minted by any language
+// CLI:  dst-odin            → showcase (mint, verify, tamper, alg:none, expiry)
+//       dst-odin emit  PATH → write a valid token
+//       dst-odin verify PATH → verify+decode a token minted by any language
 package main
 
 import "core:crypto/hash"
@@ -16,7 +16,7 @@ import "core:strings"
 import tok "../../gen/odin"
 import dr "../../gen/odin/runtime"
 
-SECRET :: "dagr-web-token-demo-secret-2026"
+SECRET :: "dagr-signed-token-demo-secret-2026"
 KID :: "hmac-key-2026"
 NOW :: u64(1_760_000_000)
 EXP :: NOW + 3600
@@ -165,7 +165,7 @@ main :: proc() {
 		os.exit(0 if v.ok else 1)
 	}
 
-	fmt.println("== dagr-web-token — Odin ==\n")
+	fmt.println("== dagr-signed-token — Odin ==\n")
 	token := mint(SECRET, "HS256", EXP)
 	fmt.printf("Minted token: %d bytes\n\n", len(token))
 	fmt.println("Verification:")

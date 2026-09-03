@@ -1,4 +1,4 @@
-// dagr-web-token — TypeScript example (see ../../CONTRACT.md).
+// dagr-signed-token — TypeScript example (see ../../CONTRACT.md).
 // Codec is the generated gen/typescript modules; crypto is Node's built-in
 // `node:crypto` (HMAC-SHA256) — no npm dependencies.
 //
@@ -11,7 +11,7 @@ import { Buf, readLEB } from "../../gen/typescript/dagr_reader";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const SECRET = Buffer.from("dagr-web-token-demo-secret-2026");
+const SECRET = Buffer.from("dagr-signed-token-demo-secret-2026");
 const KID = "hmac-key-2026";
 const NOW = 1_760_000_000n;
 const EXP = NOW + 3600n;
@@ -98,7 +98,7 @@ if (cmd === "emit" && path) {
   report(`[ts] ${path}`, v);
   process.exit(v.ok ? 0 : 1);
 } else {
-  console.log("== dagr-web-token — TypeScript ==\n");
+  console.log("== dagr-signed-token — TypeScript ==\n");
   const token = mint("HS256", EXP);
   console.log(`Minted token: ${token.length} bytes\n`);
   console.log("Verification:");

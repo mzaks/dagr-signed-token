@@ -1,18 +1,18 @@
-//! dagr-web-token — Rust example. Mints and verifies the shared token (see
-//! ../../CONTRACT.md). The codec is the generated `dagr_web_token` crate; the
+//! dagr-signed-token — Rust example. Mints and verifies the shared token (see
+//! ../../CONTRACT.md). The codec is the generated `dagr_signed_token` crate; the
 //! crypto is the hand-rolled, NIST/RFC-4231-validated SHA-256/HMAC in sha256.rs.
 //!
-//! CLI:  dwt            → run the showcase (mint, verify, tamper, alg:none, expiry)
-//!       dwt emit  PATH → write a valid token to PATH
-//!       dwt verify PATH → verify+decode a token minted by any language
+//! CLI:  dst            → run the showcase (mint, verify, tamper, alg:none, expiry)
+//!       dst emit  PATH → write a valid token to PATH
+//!       dst verify PATH → verify+decode a token minted by any language
 
 mod sha256;
 
-use dagr_web_token::dagr_runtime::DagrError;
-use dagr_web_token::token::{Json, Jws, TokenArena, TokenGraph};
+use dagr_signed_token::dagr_runtime::DagrError;
+use dagr_signed_token::token::{Json, Jws, TokenArena, TokenGraph};
 use sha256::{ct_eq, hmac_sha256};
 
-const SECRET: &[u8] = b"dagr-web-token-demo-secret-2026";
+const SECRET: &[u8] = b"dagr-signed-token-demo-secret-2026";
 const KID: &str = "hmac-key-2026";
 const NOW: u64 = 1_760_000_000;
 const EXP: u64 = NOW + 3600;
@@ -102,8 +102,8 @@ fn report(label: &str, r: &Result<TokenArena<0>, Rejected>) {
 }
 
 fn body_start(data: &[u8]) -> usize {
-    let (_f, rl) = dagr_web_token::dagr_runtime::read_leb(data, 0).unwrap();
-    let (hcs, hcsb) = dagr_web_token::dagr_runtime::read_leb(data, rl).unwrap();
+    let (_f, rl) = dagr_signed_token::dagr_runtime::read_leb(data, 0).unwrap();
+    let (hcs, hcsb) = dagr_signed_token::dagr_runtime::read_leb(data, rl).unwrap();
     rl + hcsb + hcs as usize
 }
 
@@ -124,7 +124,7 @@ fn main() {
         _ => {}
     }
 
-    println!("== dagr-web-token — Rust ==\n");
+    println!("== dagr-signed-token — Rust ==\n");
     let token = mint(SECRET, "HS256", EXP);
     println!("Minted token: {} bytes\n", token.len());
     println!("Verification:");

@@ -1,13 +1,13 @@
 [package]
-name = "dwt-rust-demo"
+name = "dst-rust-demo"
 version = "0.1.0"
 edition = "2024"
 
 # The only dependency is the generated Dagr crate. The crypto (SHA-256/HMAC) is
 # hand-rolled in src/sha256.rs — the whole demo is dependency-free.
 [dependencies]
-dagr_web_token = { path = "../../gen/rust" }
+dagr_signed_token = { path = "../../gen/rust" }
 
 [[bin]]
-name = "dwt"
+name = "dst"
 path = "src/main.rs"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dagr-web-token — Python example (see ../../CONTRACT.md).
+"""dagr-signed-token — Python example (see ../../CONTRACT.md).
 
 Codec is the generated pure-Python module in gen/python (reflective Fork A); crypto
 is the standard-library `hmac`/`hashlib` — no third-party dependencies.
@@ -20,14 +20,14 @@ import sys
 # name; its own siblings (dagr_py, dagr_schema, …) still resolve from gen/python.
 _GEN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "gen", "python"))
 sys.path.append(_GEN)
-_spec = importlib.util.spec_from_file_location("dwt_token", os.path.join(_GEN, "token.py"))
+_spec = importlib.util.spec_from_file_location("dst_token", os.path.join(_GEN, "token.py"))
 _wt = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _wt   # dataclasses resolves annotations via sys.modules[cls.__module__]
 _spec.loader.exec_module(_wt)
 Claims, JsonMember, Json = _wt.Claims, _wt.JsonMember, _wt.Json
 to_bytes_with_header, from_bytes_with_header = _wt.to_bytes_with_header, _wt.from_bytes_with_header
 
-SECRET = b"dagr-web-token-demo-secret-2026"
+SECRET = b"dagr-signed-token-demo-secret-2026"
 KID = "hmac-key-2026"
 NOW = 1_760_000_000
 EXP = NOW + 3600
@@ -133,7 +133,7 @@ def main():
             print("  [python] %s  REJECT  [%s] %s" % (argv[2], e.stage, e.reason))
             sys.exit(1)
 
-    print("== dagr-web-token — Python ==\n")
+    print("== dagr-signed-token — Python ==\n")
     token = mint(SECRET, "HS256", EXP)
     print("Minted token: %d bytes\n" % len(token))
     print("Verification:")

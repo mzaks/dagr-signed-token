@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cross-language validation for dagr-web-token.
+# Cross-language validation for dagr-signed-token.
 #
 # Regenerates the code with `dagr build`, then mints the token in each language,
 # has every language verify every language's token (N×N), and asserts the minted
@@ -16,8 +16,8 @@ cargo build --quiet --manifest-path examples/rust/Cargo.toml
 RUST=(cargo run --quiet --manifest-path examples/rust/Cargo.toml --)
 
 echo "== [build] Swift =="
-swiftc -O gen/swift/Sources/dagr_web_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dwt-swift
-SWIFT=(./examples/swift/dwt-swift)
+swiftc -O gen/swift/Sources/dagr_signed_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dst-swift
+SWIFT=(./examples/swift/dst-swift)
 
 echo "== [build] TypeScript (tsx, no build step) =="
 TS=(npx --yes tsx examples/typescript/demo.ts)
@@ -31,13 +31,13 @@ echo "== [build] Mojo (compile once via the local pixi project) =="
 # (rather than `mojo run` per call) and run the binary inside that env.
 MOJO_PIXI="${MOJO_PIXI:-$ROOT/examples/mojo/pixi.toml}"
 pixi run --manifest-path "$MOJO_PIXI" mojo build -I "$ROOT/gen/mojo" \
-  "$ROOT/examples/mojo/main.mojo" -o "$ROOT/examples/mojo/dwt-mojo"
-MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dwt-mojo")
+  "$ROOT/examples/mojo/main.mojo" -o "$ROOT/examples/mojo/dst-mojo"
+MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dst-mojo")
 
 echo "== [build] Odin =="
 # The example package imports the generated gen/odin package + its runtime sub-package.
-odin build examples/odin -out:examples/odin/dwt-odin
-ODIN=(./examples/odin/dwt-odin)
+odin build examples/odin -out:examples/odin/dst-odin
+ODIN=(./examples/odin/dst-odin)
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

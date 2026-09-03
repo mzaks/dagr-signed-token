@@ -1,4 +1,4 @@
-# dagr-web-token — Mojo example (see ../../CONTRACT.md).
+# dagr-signed-token — Mojo example (see ../../CONTRACT.md).
 #
 # Codec is the generated gen/mojo modules; crypto (HMAC-SHA256) + file I/O go through
 # Python interop (stdlib hmac/hashlib) — no third-party Mojo deps.
@@ -13,7 +13,7 @@ from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with
 from token_restore import restore_claims_graph
 from dagr_reader import read_leb
 
-comptime SECRET = "dagr-web-token-demo-secret-2026"
+comptime SECRET = "dagr-signed-token-demo-secret-2026"
 comptime KID = "hmac-key-2026"
 comptime NOW = UInt64(1_760_000_000)
 comptime EXP = NOW + 3600
@@ -216,7 +216,7 @@ def main() raises:
             _ = sys.exit(1)
         return
 
-    print("== dagr-web-token — Mojo ==\n")
+    print("== dagr-signed-token — Mojo ==\n")
     var token = mint(String("HS256"), EXP)
     print("Minted token: " + String(len(token)) + " bytes\n")
     print("Verification:")
