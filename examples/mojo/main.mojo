@@ -1,13 +1,12 @@
 # dagr-signed-token — Mojo example (see ../../CONTRACT.md).
 #
-# Codec is the generated gen/mojo modules; crypto (HMAC-SHA256) + file I/O go through
-# Python interop (stdlib hmac/hashlib) — no third-party Mojo deps.
+# Codec is the generated gen/mojo modules; crypto (HMAC-SHA256) is hand-rolled native
+# Mojo (see _sha256/hmac_sha256); file I/O is native — zero third-party deps, no Python.
 #
 #   mojo run -I gen/mojo main.mojo             → showcase
 #   mojo run -I gen/mojo main.mojo emit  PATH  → write a valid token
 #   mojo run -I gen/mojo main.mojo verify PATH → verify+decode a token minted by any language
-from std.python import Python, PythonObject
-from std.sys import argv
+from std.sys import argv, exit
 from std.memory import ArcPointer
 from token_arena import TokenArena
 from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header, read_claims_header
@@ -20,39 +19,109 @@ comptime KID = "hmac-key-2026"
 comptime NOW = UInt64(1_760_000_000)
 comptime EXP = NOW + 3600
 
-# ── Python-interop helpers: bytes conversion, HMAC, file I/O ───────────────────
-def _to_pybytes(b: Span[UInt8, _]) raises -> PythonObject:
-    var builtins = Python.import_module("builtins")
-    var lst = builtins.list()
-    for i in range(len(b)):
-        _ = lst.append(Int(b[i]))
-    return builtins.bytes(lst)
+# ── Zero-dependency crypto: hand-rolled SHA-256 + HMAC-SHA256 ──────────────────
+# Mirrors examples/rust/src/sha256.rs — no Python runtime, no third-party deps, so
+# the whole demo (crypto included) pulls in nothing, matching Dagr's own ethos.
+# Small and readable, NOT hardened production crypto; for real systems use a vetted
+# library. The point is that the *envelope mechanics* are Dagr's; the algorithm is
+# the caller's choice.
+def _rotr(x: UInt32, n: UInt32) -> UInt32:
+    return (x >> n) | (x << (UInt32(32) - n))
 
-def _from_pybytes(o: PythonObject) raises -> List[UInt8]:
+# SHA-256 of an arbitrary byte string → 32-byte digest.
+def _sha256(msg: Span[UInt8, _]) -> List[UInt8]:
+    var k: List[UInt32] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+    var h: List[UInt32] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    # Pad: append 0x80, then zeros, then the 64-bit big-endian bit length.
+    var data = List[UInt8]()
+    for i in range(len(msg)):
+        data.append(msg[i])
+    var bitlen = UInt64(len(msg)) * 8
+    data.append(0x80)
+    while len(data) % 64 != 56:
+        data.append(0)
+    for i in range(8):
+        data.append(UInt8((bitlen >> UInt64((7 - i) * 8)) & 0xFF))
+
+    var nblocks = len(data) // 64
+    for b in range(nblocks):
+        var off = b * 64
+        var w = List[UInt32]()
+        for i in range(16):
+            var j = off + i * 4
+            w.append((UInt32(data[j]) << 24) | (UInt32(data[j + 1]) << 16)
+                     | (UInt32(data[j + 2]) << 8) | UInt32(data[j + 3]))
+        for i in range(16, 64):
+            var s0 = _rotr(w[i - 15], 7) ^ _rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+            var s1 = _rotr(w[i - 2], 17) ^ _rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+            w.append(w[i - 16] + s0 + w[i - 7] + s1)
+
+        var aa = h[0]; var bb = h[1]; var cc = h[2]; var dd = h[3]
+        var ee = h[4]; var ff = h[5]; var gg = h[6]; var hh = h[7]
+        for i in range(64):
+            var big_s1 = _rotr(ee, 6) ^ _rotr(ee, 11) ^ _rotr(ee, 25)
+            var ch = (ee & ff) ^ (~ee & gg)
+            var t1 = hh + big_s1 + ch + k[i] + w[i]
+            var big_s0 = _rotr(aa, 2) ^ _rotr(aa, 13) ^ _rotr(aa, 22)
+            var maj = (aa & bb) ^ (aa & cc) ^ (bb & cc)
+            var t2 = big_s0 + maj
+            hh = gg; gg = ff; ff = ee; ee = dd + t1
+            dd = cc; cc = bb; bb = aa; aa = t1 + t2
+        h[0] = h[0] + aa; h[1] = h[1] + bb; h[2] = h[2] + cc; h[3] = h[3] + dd
+        h[4] = h[4] + ee; h[5] = h[5] + ff; h[6] = h[6] + gg; h[7] = h[7] + hh
+
     var out = List[UInt8]()
-    for v in o:
-        out.append(UInt8(Int(py=v)))
+    for i in range(8):
+        out.append(UInt8((h[i] >> 24) & 0xFF))
+        out.append(UInt8((h[i] >> 16) & 0xFF))
+        out.append(UInt8((h[i] >> 8) & 0xFF))
+        out.append(UInt8(h[i] & 0xFF))
     return out^
 
-def hmac_sha256(key: String, msg: List[UInt8]) raises -> List[UInt8]:
-    var hmac = Python.import_module("hmac")
-    var hashlib = Python.import_module("hashlib")
-    var kb = _to_pybytes(String(key).as_bytes())
-    var mb = _to_pybytes(Span(msg))
-    return _from_pybytes(hmac.new(kb, mb, hashlib.sha256).digest())
+# HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT.
+def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
+    comptime BLOCK = 64
+    var kb = String(key).as_bytes()
+    var k = List[UInt8]()
+    for _ in range(BLOCK):
+        k.append(0)
+    if len(kb) > BLOCK:
+        var kh = _sha256(kb)
+        for i in range(32):
+            k[i] = kh[i]
+    else:
+        for i in range(len(kb)):
+            k[i] = kb[i]
+
+    var inner = List[UInt8]()
+    var outer = List[UInt8]()
+    for i in range(BLOCK):
+        inner.append(UInt8(0x36) ^ k[i])
+        outer.append(UInt8(0x5c) ^ k[i])
+    for i in range(len(msg)):
+        inner.append(msg[i])
+    var inner_hash = _sha256(Span(inner))
+    for i in range(32):
+        outer.append(inner_hash[i])
+    return _sha256(Span(outer))
 
 def _read_file(path: String) raises -> List[UInt8]:
-    var builtins = Python.import_module("builtins")
-    var f = builtins.open(path, "rb")
-    var data = f.read()
-    _ = f.close()
-    return _from_pybytes(data)
+    return open(path, "r").read_bytes()
 
 def _write_file(path: String, b: List[UInt8]) raises:
-    var builtins = Python.import_module("builtins")
-    var f = builtins.open(path, "wb")
-    _ = f.write(_to_pybytes(b))
-    _ = f.close()
+    var f = open(path, "w")
+    f.write_bytes(Span(b))
 
 # preimage(rootOffset, body) = LE_u64(rootOffset) ++ body  (see CONTRACT.md)
 def preimage(root_offset: Int, body: List[UInt8]) raises -> List[UInt8]:
@@ -69,17 +138,6 @@ def _tail(buf: List[UInt8], start: Int) raises -> List[UInt8]:
     for i in range(start, len(buf)):
         out.append(buf[i])
     return out^
-
-def _push_leb(mut out: List[UInt8], value: UInt64):
-    var v = value
-    while True:
-        var b = UInt8(v & 0x7F)
-        v >>= 7
-        if v != 0:
-            b |= 0x80
-        out.append(b)
-        if v == 0:
-            break
 
 # ── Mint ───────────────────────────────────────────────────────────────────────
 def _build_arena(exp: UInt64) raises -> TokenArena:
@@ -229,8 +287,7 @@ def main() raises:
             print("[mojo] direct != arena (arena " + String(len(a)) + " vs direct " + String(len(d)) + ")")
             _write_file(String("/tmp/mojo_a.bin"), a)
             _write_file(String("/tmp/mojo_d.bin"), d)
-            var sys = Python.import_module("sys")
-            _ = sys.exit(1)
+            exit(1)
         return
     if len(args) >= 3 and args[1] == "emit":
         _write_file(String(args[2]), mint(String("HS256"), EXP))
@@ -245,8 +302,7 @@ def main() raises:
             var parts = r.split("|")
             print("  [mojo] " + String(args[2]) + "  REJECT [" + String(parts[0]) + "] " + String(parts[1]))
             # non-zero exit for the harness
-            var sys = Python.import_module("sys")
-            _ = sys.exit(1)
+            exit(1)
         return
 
     print("== dagr-signed-token — Mojo ==\n")
