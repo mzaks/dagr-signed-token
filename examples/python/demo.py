@@ -54,8 +54,8 @@ def mint(secret: bytes, alg: str, exp: int) -> bytes:
         subject="user-42",
         issuer="https://issuer.dagr.one",
         audience="dagr-api",
-        issuedAt=NOW,
-        expiresAt=exp,
+        issued_at=NOW,
+        expires_at=exp,
         scopes=["read:profile", "write:posts"],
         custom=custom,
     )
@@ -85,7 +85,7 @@ def verify(token: bytes, secret: bytes, now: int) -> Claims:
             raise Rejected("BadSignature", "GATE (verify-before-parse)")
 
     root = from_bytes_with_header(token, gate)  # raises Rejected before body decode on failure
-    if now >= root.expiresAt:
+    if now >= root.expires_at:
         raise Rejected("Expired", "post-decode claim check")
     if root.audience != "dagr-api":
         raise Rejected("WrongAudience", "post-decode claim check")
