@@ -9,7 +9,7 @@
 from std.sys import argv, exit
 from std.sys.intrinsics import llvm_intrinsic
 from std.time import perf_counter_ns
-from std.memory import ArcPointer
+from std.memory import ArcPointer, unsafe_memcpy, unsafe_memset_zero
 from token_arena import TokenArena
 from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header
 from token_direct import DirectClaims, DirectJson, DirectJsonMember, serialize_claims_graph_direct, serialize_claims_graph_with_header_direct
@@ -45,6 +45,9 @@ def _sha256su1(a: _u32x4, b: _u32x4, c: _u32x4) -> _u32x4:
 @always_inline
 def _bswap4(w: _u32x4) -> _u32x4:                # byte-swap 4 lanes: LE-loaded words -> big-endian (rev32)
     return llvm_intrinsic["llvm.bswap.v4i32", _u32x4, has_side_effect=False](w)
+@always_inline
+def _bswap8(w: UInt64) -> UInt64:                # byte-swap a u64 (host-LE store of this = big-endian)
+    return llvm_intrinsic["llvm.bswap.i64", UInt64, has_side_effect=False](w)
 
 # The 64 round constants as 16 comptime vectors of 4 — baked in as immediates (like ring's
 # static K table). No per-call heap List, no bounds-checked loads in the compression loop.
@@ -128,34 +131,38 @@ struct Sha256(Copyable, Movable):
         return h^
 
     def update(mut self, data: Span[UInt8, _]):
-        self.total += UInt64(len(data))
+        var ln = len(data)
+        self.total += UInt64(ln)
         var i = 0
-        if self.n > 0:                                   # top up the partial block first
-            while self.n < 64 and i < len(data):
-                self.buf[self.n] = data[i]; self.n += 1; i += 1
+        var dp = data.unsafe_ptr()
+        var bp = self.buf.unsafe_ptr()
+        if self.n > 0:                                   # top up the partial block first (bulk copy)
+            var take = 64 - self.n
+            if ln < take: take = ln
+            unsafe_memcpy(dest=bp.unsafe_offset(self.n), src=dp, count=take)
+            self.n += take; i += take
             if self.n == 64:
                 _block(self.s0, self.s1, Span(self.buf), 0); self.n = 0
-        while i + 64 <= len(data):                       # full blocks straight from the Span
+        while i + 64 <= ln:                              # full blocks straight from the Span
             _block(self.s0, self.s1, data, i); i += 64
-        while i < len(data):                             # buffer the remainder
-            self.buf[self.n] = data[i]; self.n += 1; i += 1
+        if i < ln:                                       # buffer the remainder (bulk copy)
+            unsafe_memcpy(dest=bp.unsafe_offset(self.n), src=dp.unsafe_offset(i), count=ln - i)
+            self.n += ln - i
 
     def finalize(mut self) -> InlineArray[UInt8, 32]:
         var bits = self.total * 8
+        var bp = self.buf.unsafe_ptr()
         self.buf[self.n] = 0x80; self.n += 1
-        if self.n > 56:
-            while self.n < 64: self.buf[self.n] = 0; self.n += 1
+        if self.n > 56:                                                       # pad spills into an extra block
+            unsafe_memset_zero(bp.unsafe_offset(self.n), 64 - self.n)
             _block(self.s0, self.s1, Span(self.buf), 0); self.n = 0
-        while self.n < 56: self.buf[self.n] = 0; self.n += 1
-        for j in range(8): self.buf[56 + j] = UInt8((bits >> UInt64((7 - j) * 8)) & 0xFF)
+        unsafe_memset_zero(bp.unsafe_offset(self.n), 56 - self.n)             # zero-pad up to the length field
+        (bp.unsafe_offset(56)).unsafe_bitcast[UInt64]().unsafe_store[alignment=1](_bswap8(bits))  # 64-bit BE length
         _block(self.s0, self.s1, Span(self.buf), 0)
-        var out = InlineArray[UInt8, 32](fill=0)
-        for lane in range(4):
-            out[lane * 4] = UInt8((self.s0[lane] >> 24) & 0xFF);      out[lane * 4 + 1] = UInt8((self.s0[lane] >> 16) & 0xFF)
-            out[lane * 4 + 2] = UInt8((self.s0[lane] >> 8) & 0xFF);   out[lane * 4 + 3] = UInt8(self.s0[lane] & 0xFF)
-        for lane in range(4):
-            out[16 + lane * 4] = UInt8((self.s1[lane] >> 24) & 0xFF); out[16 + lane * 4 + 1] = UInt8((self.s1[lane] >> 16) & 0xFF)
-            out[16 + lane * 4 + 2] = UInt8((self.s1[lane] >> 8) & 0xFF); out[16 + lane * 4 + 3] = UInt8(self.s1[lane] & 0xFF)
+        var out = InlineArray[UInt8, 32](uninitialized=True)                 # fully overwritten by the two stores
+        var op = out.unsafe_ptr()
+        op.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](_bswap4(self.s0))               # H0..H3 big-endian
+        (op.unsafe_offset(16)).unsafe_bitcast[UInt32]().unsafe_store[alignment=1](_bswap4(self.s1))  # H4..H7
         return out^
 
 # HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT. Streaming: the ipad/
@@ -182,8 +189,7 @@ def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
     var outer = Sha256._seeded(so0, so1); outer.update(Span(ih))
     var fh = outer.finalize()
     var out = List[UInt8](unsafe_uninit_length=32)
-    for i in range(32):
-        out[i] = fh[i]
+    unsafe_memcpy(dest=out.unsafe_ptr(), src=fh.unsafe_ptr(), count=32)   # 32-byte tag, one copy
     return out^
 
 # HMAC over the signing preimage `LE_u64(root_off) ++ body` — streamed, so the preimage
@@ -212,8 +218,7 @@ def hmac_sha256_preimage(key: String, root_off: Int, body: Span[UInt8, _]) -> Li
     outer.update(Span(ih))
     var fh = outer.finalize()
     var out = List[UInt8](unsafe_uninit_length=32)
-    for i in range(32):
-        out[i] = fh[i]
+    unsafe_memcpy(dest=out.unsafe_ptr(), src=fh.unsafe_ptr(), count=32)   # 32-byte tag, one copy
     return out^
 
 def _read_file(path: String) raises -> List[UInt8]:
