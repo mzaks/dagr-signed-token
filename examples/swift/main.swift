@@ -84,8 +84,9 @@ func verify(_ token: Data, secret: Data, now: UInt64) -> Result<Token.ClaimsAcce
     var reason: Rejected?
     do {
         let c = try Token.lazyRoot(from: token, header: { h, rootOffset, body in
-            if h.algorithm != "HS256" { reason = .badAlg; throw Rejected.badAlg }
-            if !hmacValid(key: secret, msg: preimage(rootOffset, body), tag: h.signature) {
+            // `h` is the lazy header accessor — read algorithm/signature on demand, keyId untouched.
+            if try h.algorithm != "HS256" { reason = .badAlg; throw Rejected.badAlg }
+            if try !hmacValid(key: secret, msg: preimage(rootOffset, body), tag: h.signature) {
                 reason = .badSignature; throw Rejected.badSignature
             }
         })
