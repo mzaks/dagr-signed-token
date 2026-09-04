@@ -9,9 +9,9 @@
 from std.sys import argv, exit
 from std.memory import ArcPointer
 from token_arena import TokenArena
-from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header, read_claims_header
+from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header
 from token_direct import DirectClaims, DirectJson, DirectJsonMember, serialize_claims_graph_direct, serialize_claims_graph_with_header_direct
-from token_reader import ClaimsAccessor, JsonPackedView
+from token_reader import ClaimsAccessor, JsonPackedView, read_claims_root_with_header
 from dagr_reader import read_leb
 
 comptime SECRET = "dagr-signed-token-demo-secret-2026"
@@ -169,35 +169,36 @@ def mint(alg: String, exp: UInt64) raises -> List[UInt8]:
 # ── Verify ───────────────────────────────────────────────────────────────────────
 # Returns "" on success, else a "STAGE|REASON" rejection string.
 def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
-    var sp = Span(buf)
-    var fr = read_leb(sp, 0)
-    var stored_off = Int(fr[0] >> 2)
-    var flen = fr[1]
-    var hcs = read_leb(sp, flen)
-    var H = hcs[1] + Int(hcs[0])
-    var root_off = stored_off - H
-    var body = _tail(buf, flen + H)
-    var hdr = read_claims_header(sp)
-    # Gate (verify-before-parse): pin algorithm, recompute HMAC.
-    if hdr.algorithm != String("HS256"):
-        return String("GATE (verify-before-parse)|BadAlg")
-    var expected = hmac_sha256(secret, preimage(root_off, body))
-    if len(hdr.signature) != len(expected):
-        return String("GATE (verify-before-parse)|BadSignature")
-    var diff = 0
-    for i in range(len(expected)):
-        diff |= Int(hdr.signature[i] ^ expected[i])
-    if diff != 0:
-        return String("GATE (verify-before-parse)|BadSignature")
-    # Post-decode over the now-trusted body — ZERO-ALLOC LAZY ACCESSOR, no arena restore.
-    # The root sits at `flen + stored_off` (past the framing word + packed header, §14 §4).
-    var c = ClaimsAccessor(Span(buf), flen + stored_off)
-    if now >= c.expiresAt():
-        return String("post-decode claim check|Expired")
-    var aud = c.audience()
-    if not aud or aud.value() != String("dagr-api"):
-        return String("post-decode claim check|WrongAudience")
-    return String("")
+    # The generated `read_claims_root_with_header` decodes framing + packed header,
+    # runs this gate, and only THEN hands back a lazy ClaimsAccessor — no hand-rolled
+    # offset math, and it validates the framing bits we used to skip.
+    @parameter
+    def gate(hdr: Jws, root_off: Int, body: List[UInt8]) raises:
+        # Gate (verify-before-parse): pin algorithm, recompute HMAC.
+        if hdr.algorithm != String("HS256"):
+            raise Error("GATE (verify-before-parse)|BadAlg")
+        var expected = hmac_sha256(secret, preimage(root_off, body))
+        var ok = len(hdr.signature) == len(expected)
+        if ok:
+            var diff = 0
+            for i in range(len(expected)):
+                diff |= Int(hdr.signature[i] ^ expected[i])
+            ok = diff == 0
+        if not ok:
+            raise Error("GATE (verify-before-parse)|BadSignature")
+    try:
+        var c = read_claims_root_with_header[gate](Span(buf))
+        # Post-decode over the now-trusted body — ZERO-ALLOC LAZY ACCESSOR, no restore.
+        if now >= c.expiresAt():
+            return String("post-decode claim check|Expired")
+        var aud = c.audience()
+        if not aud or aud.value() != String("dagr-api"):
+            return String("post-decode claim check|WrongAudience")
+        return String("")
+    except e:
+        # Gate rejections carry a "STAGE|REASON" message; wrap any structural error.
+        var m = String(e)
+        return m if m.find("|") >= 0 else String("GATE (verify-before-parse)|Malformed")
 
 # Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
 # Writes straight into a Writer: one growing buffer, no per-node String allocation.
