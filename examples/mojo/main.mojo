@@ -43,8 +43,8 @@ def _sha256su1(a: _u32x4, b: _u32x4, c: _u32x4) -> _u32x4:
     return llvm_intrinsic["llvm.aarch64.crypto.sha256su1", _u32x4, has_side_effect=False](a, b, c)
 
 @always_inline
-def _bew(b: Span[UInt8, _], i: Int) -> UInt32:   # big-endian u32 load
-    return (UInt32(b[i]) << 24) | (UInt32(b[i + 1]) << 16) | (UInt32(b[i + 2]) << 8) | UInt32(b[i + 3])
+def _bswap4(w: _u32x4) -> _u32x4:                # byte-swap 4 lanes: LE-loaded words -> big-endian (rev32)
+    return llvm_intrinsic["llvm.bswap.v4i32", _u32x4, has_side_effect=False](w)
 
 # The 64 round constants as 16 comptime vectors of 4 — baked in as immediates (like ring's
 # static K table). No per-call heap List, no bounds-checked loads in the compression loop.
@@ -67,13 +67,15 @@ comptime _K15 = _u32x4(0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2)
 
 # Compress one 64-byte block into (s0, s1) = (H0..H3, H4..H7) — the canonical 16-quad
 # ARMv8 SHA-256 sequence (msg schedule via su0/su1, rounds via sha256h/h2).
+@always_inline
 def _block(mut s0: _u32x4, mut s1: _u32x4, blk: Span[UInt8, _], off: Int):
     var abef = s0
     var cdgh = s1
-    var m0 = _u32x4(_bew(blk, off + 0),  _bew(blk, off + 4),  _bew(blk, off + 8),  _bew(blk, off + 12))
-    var m1 = _u32x4(_bew(blk, off + 16), _bew(blk, off + 20), _bew(blk, off + 24), _bew(blk, off + 28))
-    var m2 = _u32x4(_bew(blk, off + 32), _bew(blk, off + 36), _bew(blk, off + 40), _bew(blk, off + 44))
-    var m3 = _u32x4(_bew(blk, off + 48), _bew(blk, off + 52), _bew(blk, off + 56), _bew(blk, off + 60))
+    var bp = blk.unsafe_ptr()                    # vectorized big-endian load: 16-byte SIMD load + rev32 per quad
+    var m0 = _bswap4(bp.unsafe_offset(off + 0 ).unsafe_bitcast[UInt32]().unsafe_load[width=4, alignment=1]())
+    var m1 = _bswap4(bp.unsafe_offset(off + 16).unsafe_bitcast[UInt32]().unsafe_load[width=4, alignment=1]())
+    var m2 = _bswap4(bp.unsafe_offset(off + 32).unsafe_bitcast[UInt32]().unsafe_load[width=4, alignment=1]())
+    var m3 = _bswap4(bp.unsafe_offset(off + 48).unsafe_bitcast[UInt32]().unsafe_load[width=4, alignment=1]())
     var t0 = m0 + _K0; var t1: _u32x4; var t2: _u32x4
     m0 = _sha256su0(m0, m1); t2 = s0; t1 = m1 + _K1;  s0 = _sha256h(s0, s1, t0); s1 = _sha256h2(s1, t2, t0); m0 = _sha256su1(m0, m2, m3)
     m1 = _sha256su0(m1, m2); t2 = s0; t0 = m2 + _K2;  s0 = _sha256h(s0, s1, t1); s1 = _sha256h2(s1, t2, t1); m1 = _sha256su1(m1, m3, m0)
@@ -99,6 +101,9 @@ def _block(mut s0: _u32x4, mut s1: _u32x4, blk: Span[UInt8, _], off: Int):
 # List. `kw` = the round-constant vectors (built once by the caller; HMAC reuses across 3
 # hashes). The digest is returned in a stack InlineArray so intermediate hashes never touch
 # the heap either.
+comptime _IV0 = _u32x4(0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a)
+comptime _IV1 = _u32x4(0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
+
 struct Sha256(Copyable, Movable):
     var s0: _u32x4
     var s1: _u32x4
@@ -107,11 +112,20 @@ struct Sha256(Copyable, Movable):
     var total: UInt64
 
     def __init__(out self):
-        self.s0 = _u32x4(0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a)
-        self.s1 = _u32x4(0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
+        self.s0 = _IV0
+        self.s1 = _IV1
         self.buf = InlineArray[UInt8, 64](fill=0)
         self.n = 0
         self.total = 0
+
+    # Continue a hash whose first 64-byte block was already absorbed into (s0, s1) — used to
+    # seed inner/outer from the interleaved ipad/opad compressions (total preset to that block).
+    @staticmethod
+    @always_inline
+    def _seeded(s0: _u32x4, s1: _u32x4) -> Sha256:
+        var h = Sha256()
+        h.s0 = s0; h.s1 = s1; h.total = 64
+        return h^
 
     def update(mut self, data: Span[UInt8, _]):
         self.total += UInt64(len(data))
@@ -148,7 +162,7 @@ struct Sha256(Copyable, Movable):
 # opad key blocks live on the STACK (InlineArray) and the message is fed directly to the
 # hash — no inner/outer/key Lists, only the final 32-byte tag is heap-allocated.
 def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
-    var kb = String(key).as_bytes()
+    var kb = key.as_bytes()
     var ipad = InlineArray[UInt8, 64](fill=0x36)     # ipad[i] = 0x36 ^ key[i] (0x36 where key runs out)
     var opad = InlineArray[UInt8, 64](fill=0x5c)
     if len(kb) > 64:
@@ -159,9 +173,13 @@ def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
         for i in range(len(kb)):
             ipad[i] = 0x36 ^ kb[i]; opad[i] = 0x5c ^ kb[i]
 
-    var inner = Sha256(); inner.update(Span(ipad)); inner.update(Span(msg))
+    var si0 = _IV0; var si1 = _IV1              # ipad + opad first-blocks are independent →
+    _block(si0, si1, Span(ipad), 0)             # issue both adjacently (inlined, no data dep)
+    var so0 = _IV0; var so1 = _IV1              # so the OoO engine overlaps their sha256h latency
+    _block(so0, so1, Span(opad), 0)
+    var inner = Sha256._seeded(si0, si1); inner.update(Span(msg))
     var ih = inner.finalize()
-    var outer = Sha256(); outer.update(Span(opad)); outer.update(Span(ih))
+    var outer = Sha256._seeded(so0, so1); outer.update(Span(ih))
     var fh = outer.finalize()
     var out = List[UInt8](unsafe_uninit_length=32)
     for i in range(32):
@@ -172,7 +190,7 @@ def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
 # is never materialised as a List (the 8-byte prefix lives on the stack; the body Span is
 # hashed in place). Assumes a <=64-byte key (the demo secret). This is the verify/mint hot path.
 def hmac_sha256_preimage(key: String, root_off: Int, body: Span[UInt8, _]) -> List[UInt8]:
-    var kb = String(key).as_bytes()
+    var kb = key.as_bytes()
     var ipad = InlineArray[UInt8, 64](fill=0x36)
     var opad = InlineArray[UInt8, 64](fill=0x5c)
     for i in range(len(kb)):
@@ -181,10 +199,17 @@ def hmac_sha256_preimage(key: String, root_off: Int, body: Span[UInt8, _]) -> Li
     var v = UInt64(root_off)
     for i in range(8):
         le[i] = UInt8((v >> UInt64(i * 8)) & 0xFF)
-    var inner = Sha256()
-    inner.update(Span(ipad)); inner.update(Span(le)); inner.update(body)
+    # ipad + opad first-blocks are independent → issue both adjacently so the OoO engine
+    # overlaps their sha256h latency, then seed inner/outer from the resulting states.
+    var si0 = _IV0; var si1 = _IV1
+    _block(si0, si1, Span(ipad), 0)
+    var so0 = _IV0; var so1 = _IV1
+    _block(so0, so1, Span(opad), 0)
+    var inner = Sha256._seeded(si0, si1)
+    inner.update(Span(le)); inner.update(body)
     var ih = inner.finalize()
-    var outer = Sha256(); outer.update(Span(opad)); outer.update(Span(ih))
+    var outer = Sha256._seeded(so0, so1)
+    outer.update(Span(ih))
     var fh = outer.finalize()
     var out = List[UInt8](unsafe_uninit_length=32)
     for i in range(32):
