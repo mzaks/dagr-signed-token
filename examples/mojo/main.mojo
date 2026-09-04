@@ -190,7 +190,7 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
     try:
         var c = read_claims_root_with_header[gate](Span(buf))
         # Post-decode over the now-trusted body — ZERO-ALLOC LAZY ACCESSOR, no restore.
-        if now >= c.expiresAt():
+        if now >= c.expires_at():
             return String("post-decode claim check|Expired")
         var aud = c.audience()
         if not aud or aud.value() != String("dagr-api"):
