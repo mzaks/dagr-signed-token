@@ -285,12 +285,13 @@ def _build_direct(exp: UInt64) raises -> DirectClaims:
 
 def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
     var n = _build_direct(exp)
-    var buf0 = serialize_claims_graph_direct(n.copy())
-    var fr = read_leb(Span(buf0), 0)
-    var root_off = Int(fr[0] >> 2)
-    var body = _tail(buf0, fr[1])
-    var sig = hmac_sha256(SECRET, preimage(root_off, body))
-    return serialize_claims_graph_with_header_direct(n^, Jws(alg, Optional[String](String(KID)), sig^))
+    # Single pass: the serializer stores the body, then calls this gate over the body
+    # bytes (in the same builder) to build the signed header — no re-serialize, no copy.
+    @parameter
+    def gate(root_off: Int, body: List[UInt8]) raises -> Jws:
+        var sig = hmac_sha256(SECRET, preimage(root_off, body))
+        return Jws(alg, Optional[String](String(KID)), sig^)
+    return serialize_claims_graph_with_header_direct[gate](n^)
 
 # Mint + verify throughput (no JWT baseline in Mojo — see Rust/TS/Python for that).
 def bench() raises:
