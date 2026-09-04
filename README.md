@@ -136,8 +136,8 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | ts | jwt | 1640 | 2070 | 395 |
 | python | dagr | 60455 | 48847 | 207 |
 | python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 1500 | 645 | 207 |
-| odin | dagr | 2243 | 303 | 207 |
+| mojo | dagr | 1420 | 360 | 207 |
+| odin | dagr | 2239 | 278 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
@@ -183,8 +183,8 @@ generated reader hands the gate a zero-copy `Span` subview of the buffer (not a 
 the 64 round constants are `comptime` immediates rather than a per-call heap `List`, the
 message words load vectorized (SIMD + `rev32`), the two independent HMAC key-blocks are
 interleaved, and `update`/`finalize` do their byte handling with `memcpy`/`memset`/SIMD
-stores rather than scalar loops. Together these took Mojo verify **7920 → ~645 ns** (see
-below).)
+stores rather than scalar loops — plus a **lazy header gate** that stopped eagerly restoring
+the header. Together these took Mojo verify **7920 → ~360 ns** (see below).)
 
 **Why Mojo verify trails Rust's, and why that's expected.** Rust's `228 ns` is `ring` —
 world-class hand-tuned **assembly**; Odin's `303 ns` is `core:crypto` — a tuned **stdlib**
@@ -207,9 +207,20 @@ adjacently and the wide OoO core overlaps their `sha256h` latency) — `1000 →
 `rev32` + `u32x4` stores instead of ~145 scalar shift/mask/copy writes per verify — `890 →
 645 ns`, the single biggest step. The interleave (2) is the *smallest* win, which is the
 tell: with only 2 of ~6 blocks independent in a single-message HMAC, latency-hiding has
-little to hide — the real cost was always per-byte scalar work. Closing the last ~2.8×
-would mean `ring`'s multi-buffer hand-scheduled asm — i.e. rebuilding a crypto library —
-so we stop here.
+little to hide — the real cost was always per-byte scalar work.
+
+**Then profiling the whole `verify` (not just the crypto) showed it wasn't crypto-bound at
+all** — it split ~50/50 between the HMAC (~312 ns) and the **eager header restore** (~328 ns),
+which built an owned `Jws{algorithm, keyId, signature}` — three heap allocations per verify,
+`keyId` never even read by the gate. The fix is a **lazy header gate**: the verify-before-parse
+gate now receives the zero-alloc header *accessor* (buffer + field positions) and reads
+`algorithm`/`signature` as a `StringSlice`/`Span` straight from the buffer (`_view` getters),
+so nothing is materialized and `keyId` is skipped. That erased the header half — **verify
+`645 → 360 ns`** — and verify is now genuinely HMAC-bound (~91 %), a hair behind Odin's
+`core:crypto` (278 ns) and closing on Rust's `ring` (239 ns). Closing the last bit would mean
+`ring`'s multi-buffer hand-scheduled asm — i.e. rebuilding a crypto library — so we stop here.
+(The same lazy-header-gate change applies to Odin, whose getters already borrowed from the
+buffer, so its win was small: `297 → 278 ns`.)
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
