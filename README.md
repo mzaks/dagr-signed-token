@@ -129,7 +129,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 1020 | **196** | **207** |
+| rust | dagr | 860 | **185** | **207** |
 | rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
 | swift | dagr | 5033 | 1859 | 207 |
 | ts | dagr | 4990 | 2190 | 207 |
@@ -235,6 +235,13 @@ list (hundreds of micro-allocations per token) and concatenated them at the end,
 encoding routed through `BigInt`. Rewritten as a **single backward-growing `Uint8Array`**
 (direct byte writes, a `number` LEB fast path, cycle late-binding recorded by cursor offset),
 it is byte-identical (6007-test suite green) and roughly halves mint: **~10.7 µs → ~5.0 µs**.
+**Rust mint** was profiled too (`dst profile`): ~870 ns = build-tree ~200 + serialize ~525 +
+`ring` HMAC ~158, and ~70 ns of the serialize was the builder's 64 KB `alloc_uninit` —
+oversized for a 207 B token. The Direct Graph Builder only ever builds *trees* (spec 31), so
+the V62 pointer width is irrelevant; a small initial buffer that grows on demand
+(`DagrBuilder::with_capacity`) trimmed serialize to ~460 ns and mint to **~830 ns**, now on
+par with `jsonwebtoken`'s own mint (858 ns).
+
 TS *verify* was then profiled too: the frozen-packed accessor decoded **every** field in its
 constructor — including `scopes` and the whole recursive `custom` JSON tree — even though
 verify reads only `expiresAt` + `audience`. Deferring composite fields (arrays / unions /
