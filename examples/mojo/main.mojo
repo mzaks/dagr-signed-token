@@ -201,10 +201,8 @@ def hmac_sha256_preimage(key: String, root_off: Int, body: Span[UInt8, _]) -> Li
     var opad = InlineArray[UInt8, 64](fill=0x5c)
     for i in range(len(kb)):
         ipad[i] = 0x36 ^ kb[i]; opad[i] = 0x5c ^ kb[i]
-    var le = InlineArray[UInt8, 8](fill=0)
-    var v = UInt64(root_off)
-    for i in range(8):
-        le[i] = UInt8((v >> UInt64(i * 8)) & 0xFF)
+    var le = InlineArray[UInt8, 8](uninitialized=True)   # LE_u64(root_off): one native-LE store, no byte loop
+    le.unsafe_ptr().unsafe_bitcast[UInt64]().unsafe_store[alignment=1](UInt64(root_off))
     # ipad + opad first-blocks are independent → issue both adjacently so the OoO engine
     # overlaps their sha256h latency, then seed inner/outer from the resulting states.
     var si0 = _IV0; var si1 = _IV1
