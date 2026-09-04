@@ -136,7 +136,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | ts | jwt | 1640 | 2070 | 395 |
 | python | dagr | 60455 | 48847 | 207 |
 | python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 1770 | 890 | 207 |
+| mojo | dagr | 1500 | 645 | 207 |
 | odin | dagr | 2243 | 303 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
@@ -181,8 +181,10 @@ HMAC keeps the SHA state + ipad/opad on the stack (`InlineArray`) and hashes the
 Span in place — no per-message padding copy, no inner/outer/preimage Lists — the
 generated reader hands the gate a zero-copy `Span` subview of the buffer (not a `List`),
 the 64 round constants are `comptime` immediates rather than a per-call heap `List`, the
-message words load vectorized (SIMD + `rev32`), and the two independent HMAC key-blocks are
-interleaved. Together these took Mojo verify **7920 → ~890 ns** (see below).)
+message words load vectorized (SIMD + `rev32`), the two independent HMAC key-blocks are
+interleaved, and `update`/`finalize` do their byte handling with `memcpy`/`memset`/SIMD
+stores rather than scalar loops. Together these took Mojo verify **7920 → ~645 ns** (see
+below).)
 
 **Why Mojo verify trails Rust's, and why that's expected.** Rust's `228 ns` is `ring` —
 world-class hand-tuned **assembly**; Odin's `303 ns` is `core:crypto` — a tuned **stdlib**
@@ -191,18 +193,23 @@ scratch**. The honest apples-to-apples: **Rust's own hand-rolled SHA-256 HMAC (t
 zero-dep default, `src/sha256.rs`) benchmarks at `1177 ns`** — so the gap is
 *library-vs-hand-rolled crypto*, **not** a language gap.
 
-The hand-roll was then tuned toward `ring`'s per-block structure (`890 ns`, ~3.9× `ring`).
+The hand-roll was then tuned toward `ring`'s per-block structure (`645 ns`, ~2.8× `ring`).
 The key diagnosis: Mojo was **overhead-bound, not `sha256h`-latency-bound** — a fully serial
 block is ~128 cycles ≈ `ring`'s per-block, yet we measured ~680 cycles/block. So the wins
-came from removing per-block overhead, not from hiding latency: (1) a **vectorized
+came from removing per-byte overhead, not from hiding latency: (1) a **vectorized
 big-endian load** (one 16-byte SIMD load + `rev32` per quad, replacing 16 bounds-checked
 scalar byte-assemblies) — `1170 → 1000 ns`; (2) **interleaving the two independent HMAC
 first-blocks** (`ipad`/`opad` have no data dependency, so both `_block`s are issued
 adjacently and the wide OoO core overlaps their `sha256h` latency) — `1000 → 925 ns`;
-(3) dropping a per-call secret `String` copy — `925 → 890 ns`. The interleave is the
-smallest of the three, which is the tell: with only 2 of ~6 blocks independent in a
-single-message HMAC, latency-hiding has little to hide. Closing the last ~4× would mean
-`ring`'s multi-buffer asm — i.e. rebuilding a crypto library — so we stop here.
+(3) dropping a per-call secret `String` copy — `925 → 890 ns`; (4) **vectorizing the
+`update`/`finalize` byte handling** — partial-block buffering via `memcpy`, padding via
+`memset`, the 64-bit length via one byte-swapped `u64` store, and the 32-byte digest via two
+`rev32` + `u32x4` stores instead of ~145 scalar shift/mask/copy writes per verify — `890 →
+645 ns`, the single biggest step. The interleave (2) is the *smallest* win, which is the
+tell: with only 2 of ~6 blocks independent in a single-message HMAC, latency-hiding has
+little to hide — the real cost was always per-byte scalar work. Closing the last ~2.8×
+would mean `ring`'s multi-buffer hand-scheduled asm — i.e. rebuilding a crypto library —
+so we stop here.
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
