@@ -129,7 +129,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 860 | **185** | **207** |
+| rust | dagr | 365 | **185** | **207** |
 | rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
 | swift | dagr | 5033 | 1859 | 207 |
 | ts | dagr | 4990 | 2190 | 207 |
@@ -239,8 +239,14 @@ it is byte-identical (6007-test suite green) and roughly halves mint: **~10.7 µ
 `ring` HMAC ~158, and ~70 ns of the serialize was the builder's 64 KB `alloc_uninit` —
 oversized for a 207 B token. The Direct Graph Builder only ever builds *trees* (spec 31), so
 the V62 pointer width is irrelevant; a small initial buffer that grows on demand
-(`DagrBuilder::with_capacity`) trimmed serialize to ~460 ns and mint to **~830 ns**, now on
-par with `jsonwebtoken`'s own mint (858 ns).
+(`DagrBuilder::with_capacity`) trimmed serialize to ~460 ns and mint to ~830 ns. Then the
+value tree itself was the next ~200 ns: the direct value structs *owned* their data
+(`String`/`Vec`), so building the tree did ~13 heap allocations (each literal allocated,
+then copied into the buffer). Switching to a **borrowed value API** (`&'a str`/`&'a [u8]`/
+`&'a [T]`) makes a literal tree entirely `'static` — **zero allocations to build it**, and
+the serializer copies straight from the (contiguous, cache-friendly `.rodata`) slices. That
+took build-tree ~200 → ~0 ns and serialize ~460 → ~215 ns: **mint ~830 → ~365 ns**, now
+**~2.3× faster than `jsonwebtoken`'s mint** (858 ns) as well as ~6× faster to verify.
 
 TS *verify* was then profiled too: the frozen-packed accessor decoded **every** field in its
 constructor — including `scopes` and the whole recursive `custom` JSON tree — even though
