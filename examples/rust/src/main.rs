@@ -63,25 +63,27 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
 /// it reads as dead code in the CLI (non-test) build.
 // Build the direct value tree (the allocation-heavy part: Strings, Vecs, Boxes).
 #[cfg_attr(not(test), allow(dead_code))]
-fn build_direct(exp: u64) -> dagr_signed_token::token::direct::Claims {
+fn build_direct(exp: u64) -> dagr_signed_token::token::direct::Claims<'static> {
     use dagr_signed_token::token::direct;
     // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
-    let custom = direct::Json::Object(vec![
-        direct::JsonMember { key: "tenant".into(), value: Some(direct::Json::String("acme".into())) },
-        direct::JsonMember { key: "roles".into(), value: Some(direct::Json::Array(vec![
-            Some(direct::Json::String("admin".into())),
-            Some(direct::Json::String("billing".into())),
+    // Borrowed value tree from string/slice literals → 'static (rvalue-promoted), ZERO heap
+    // allocation to construct; the serializer copies straight from these slices.
+    let custom = direct::Json::Object(&[
+        direct::JsonMember { key: "tenant", value: Some(direct::Json::String("acme")) },
+        direct::JsonMember { key: "roles", value: Some(direct::Json::Array(&[
+            Some(direct::Json::String("admin")),
+            Some(direct::Json::String("billing")),
         ])) },
-        direct::JsonMember { key: "mfa".into(), value: Some(direct::Json::Bool(true)) },
-        direct::JsonMember { key: "fp".into(), value: Some(direct::Json::Data(vec![0xDE, 0xAD, 0xBE, 0xEF])) },
+        direct::JsonMember { key: "mfa", value: Some(direct::Json::Bool(true)) },
+        direct::JsonMember { key: "fp", value: Some(direct::Json::Data(&[0xDE, 0xAD, 0xBE, 0xEF])) },
     ]);
     direct::Claims {
-        subject: Some("user-42".into()),
-        issuer: Some("https://issuer.dagr.one".into()),
-        audience: Some("dagr-api".into()),
+        subject: Some("user-42"),
+        issuer: Some("https://issuer.dagr.one"),
+        audience: Some("dagr-api"),
         issued_at: NOW,
         expires_at: exp,
-        scopes: vec!["read:profile".into(), "write:posts".into()],
+        scopes: &["read:profile", "write:posts"],
         custom: Some(custom),
     }
 }
