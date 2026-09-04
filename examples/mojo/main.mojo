@@ -1,7 +1,7 @@
 # dagr-signed-token — Mojo example (see ../../CONTRACT.md).
 #
-# Codec is the generated gen/mojo modules; crypto (HMAC-SHA256) is hand-rolled native
-# Mojo (see _sha256/hmac_sha256); file I/O is native — zero third-party deps, no Python.
+# Codec is the generated gen/mojo modules; crypto is native Mojo — SHA-256 on the ARMv8
+# hardware intrinsics + a streaming HMAC (see Sha256/hmac_sha256); native file I/O — zero deps.
 #
 #   mojo run -I gen/mojo main.mojo             → showcase
 #   mojo run -I gen/mojo main.mojo emit  PATH  → write a valid token
@@ -91,61 +91,104 @@ def _block(mut s0: _u32x4, mut s1: _u32x4, blk: Span[UInt8, _], off: Int, k: Lis
     s0 = s0 + abef
     s1 = s1 + cdgh
 
-# SHA-256 of an arbitrary byte string → 32-byte digest. `kw` = the round-constant vectors
-# (built once by the caller — HMAC does 3 hashes and reuses them).
-def _sha256(msg: Span[UInt8, _], kw: List[_u32x4]) -> List[UInt8]:
-    # Pad: append 0x80, then zeros, then the 64-bit big-endian bit length.
-    var data = List[UInt8]()
-    for i in range(len(msg)):
-        data.append(msg[i])
-    var bitlen = UInt64(len(msg)) * 8
-    data.append(0x80)
-    while len(data) % 64 != 56:
-        data.append(0)
-    for i in range(8):
-        data.append(UInt8((bitlen >> UInt64((7 - i) * 8)) & 0xFF))
+# Streaming SHA-256: keep the partial block on the STACK (InlineArray) and feed full
+# 64-byte blocks straight from the caller's Span — no per-message heap copy, no padding
+# List. `kw` = the round-constant vectors (built once by the caller; HMAC reuses across 3
+# hashes). The digest is returned in a stack InlineArray so intermediate hashes never touch
+# the heap either.
+struct Sha256(Copyable, Movable):
+    var s0: _u32x4
+    var s1: _u32x4
+    var buf: InlineArray[UInt8, 64]
+    var n: Int
+    var total: UInt64
 
-    var s0 = _u32x4(0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a)
-    var s1 = _u32x4(0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
-    for b in range(len(data) // 64):
-        _block(s0, s1, Span(data), b * 64, kw)
+    def __init__(out self):
+        self.s0 = _u32x4(0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a)
+        self.s1 = _u32x4(0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19)
+        self.buf = InlineArray[UInt8, 64](fill=0)
+        self.n = 0
+        self.total = 0
 
-    var out = List[UInt8]()
-    for lane in range(4):
-        out.append(UInt8((s0[lane] >> 24) & 0xFF)); out.append(UInt8((s0[lane] >> 16) & 0xFF))
-        out.append(UInt8((s0[lane] >> 8) & 0xFF));  out.append(UInt8(s0[lane] & 0xFF))
-    for lane in range(4):
-        out.append(UInt8((s1[lane] >> 24) & 0xFF)); out.append(UInt8((s1[lane] >> 16) & 0xFF))
-        out.append(UInt8((s1[lane] >> 8) & 0xFF));  out.append(UInt8(s1[lane] & 0xFF))
-    return out^
+    def update(mut self, data: Span[UInt8, _], kw: List[_u32x4]):
+        self.total += UInt64(len(data))
+        var i = 0
+        if self.n > 0:                                   # top up the partial block first
+            while self.n < 64 and i < len(data):
+                self.buf[self.n] = data[i]; self.n += 1; i += 1
+            if self.n == 64:
+                _block(self.s0, self.s1, Span(self.buf), 0, kw); self.n = 0
+        while i + 64 <= len(data):                       # full blocks straight from the Span
+            _block(self.s0, self.s1, data, i, kw); i += 64
+        while i < len(data):                             # buffer the remainder
+            self.buf[self.n] = data[i]; self.n += 1; i += 1
 
-# HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT.
+    def finalize(mut self, kw: List[_u32x4]) -> InlineArray[UInt8, 32]:
+        var bits = self.total * 8
+        self.buf[self.n] = 0x80; self.n += 1
+        if self.n > 56:
+            while self.n < 64: self.buf[self.n] = 0; self.n += 1
+            _block(self.s0, self.s1, Span(self.buf), 0, kw); self.n = 0
+        while self.n < 56: self.buf[self.n] = 0; self.n += 1
+        for j in range(8): self.buf[56 + j] = UInt8((bits >> UInt64((7 - j) * 8)) & 0xFF)
+        _block(self.s0, self.s1, Span(self.buf), 0, kw)
+        var out = InlineArray[UInt8, 32](fill=0)
+        for lane in range(4):
+            out[lane * 4] = UInt8((self.s0[lane] >> 24) & 0xFF);      out[lane * 4 + 1] = UInt8((self.s0[lane] >> 16) & 0xFF)
+            out[lane * 4 + 2] = UInt8((self.s0[lane] >> 8) & 0xFF);   out[lane * 4 + 3] = UInt8(self.s0[lane] & 0xFF)
+        for lane in range(4):
+            out[16 + lane * 4] = UInt8((self.s1[lane] >> 24) & 0xFF); out[16 + lane * 4 + 1] = UInt8((self.s1[lane] >> 16) & 0xFF)
+            out[16 + lane * 4 + 2] = UInt8((self.s1[lane] >> 8) & 0xFF); out[16 + lane * 4 + 3] = UInt8(self.s1[lane] & 0xFF)
+        return out^
+
+# HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT. Streaming: the ipad/
+# opad key blocks live on the STACK (InlineArray) and the message is fed directly to the
+# hash — no inner/outer/key Lists, only the final 32-byte tag is heap-allocated.
 def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
-    comptime BLOCK = 64
-    var kw = _kvecs()                                # round constants, built once for all 3 hashes
+    var kw = _kvecs()
     var kb = String(key).as_bytes()
-    var k = List[UInt8]()
-    for _ in range(BLOCK):
-        k.append(0)
-    if len(kb) > BLOCK:
-        var kh = _sha256(kb, kw)
+    var ipad = InlineArray[UInt8, 64](fill=0x36)     # ipad[i] = 0x36 ^ key[i] (0x36 where key runs out)
+    var opad = InlineArray[UInt8, 64](fill=0x5c)
+    if len(kb) > 64:
+        var d = Sha256(); d.update(kb, kw); var dh = d.finalize(kw)
         for i in range(32):
-            k[i] = kh[i]
+            ipad[i] = 0x36 ^ dh[i]; opad[i] = 0x5c ^ dh[i]
     else:
         for i in range(len(kb)):
-            k[i] = kb[i]
+            ipad[i] = 0x36 ^ kb[i]; opad[i] = 0x5c ^ kb[i]
 
-    var inner = List[UInt8]()
-    var outer = List[UInt8]()
-    for i in range(BLOCK):
-        inner.append(UInt8(0x36) ^ k[i])
-        outer.append(UInt8(0x5c) ^ k[i])
-    for i in range(len(msg)):
-        inner.append(msg[i])
-    var inner_hash = _sha256(Span(inner), kw)
+    var inner = Sha256(); inner.update(Span(ipad), kw); inner.update(Span(msg), kw)
+    var ih = inner.finalize(kw)
+    var outer = Sha256(); outer.update(Span(opad), kw); outer.update(Span(ih), kw)
+    var fh = outer.finalize(kw)
+    var out = List[UInt8](unsafe_uninit_length=32)
     for i in range(32):
-        outer.append(inner_hash[i])
-    return _sha256(Span(outer), kw)
+        out[i] = fh[i]
+    return out^
+
+# HMAC over the signing preimage `LE_u64(root_off) ++ body` — streamed, so the preimage
+# is never materialised as a List (the 8-byte prefix lives on the stack; the body Span is
+# hashed in place). Assumes a <=64-byte key (the demo secret). This is the verify/mint hot path.
+def hmac_sha256_preimage(key: String, root_off: Int, body: List[UInt8]) -> List[UInt8]:
+    var kw = _kvecs()
+    var kb = String(key).as_bytes()
+    var ipad = InlineArray[UInt8, 64](fill=0x36)
+    var opad = InlineArray[UInt8, 64](fill=0x5c)
+    for i in range(len(kb)):
+        ipad[i] = 0x36 ^ kb[i]; opad[i] = 0x5c ^ kb[i]
+    var le = InlineArray[UInt8, 8](fill=0)
+    var v = UInt64(root_off)
+    for i in range(8):
+        le[i] = UInt8((v >> UInt64(i * 8)) & 0xFF)
+    var inner = Sha256()
+    inner.update(Span(ipad), kw); inner.update(Span(le), kw); inner.update(Span(body), kw)
+    var ih = inner.finalize(kw)
+    var outer = Sha256(); outer.update(Span(opad), kw); outer.update(Span(ih), kw)
+    var fh = outer.finalize(kw)
+    var out = List[UInt8](unsafe_uninit_length=32)
+    for i in range(32):
+        out[i] = fh[i]
+    return out^
 
 def _read_file(path: String) raises -> List[UInt8]:
     return open(path, "r").read_bytes()
@@ -153,16 +196,6 @@ def _read_file(path: String) raises -> List[UInt8]:
 def _write_file(path: String, b: List[UInt8]) raises:
     var f = open(path, "w")
     f.write_bytes(Span(b))
-
-# preimage(rootOffset, body) = LE_u64(rootOffset) ++ body  (see CONTRACT.md)
-def preimage(root_offset: Int, body: List[UInt8]) raises -> List[UInt8]:
-    var m = List[UInt8]()
-    var v = UInt64(root_offset)
-    for i in range(8):
-        m.append(UInt8((v >> UInt64(i * 8)) & 0xFF))
-    for i in range(len(body)):
-        m.append(body[i])
-    return m^
 
 def _tail(buf: List[UInt8], start: Int) raises -> List[UInt8]:
     var out = List[UInt8]()
@@ -195,7 +228,7 @@ def mint(alg: String, exp: UInt64) raises -> List[UInt8]:
     var fr = read_leb(Span(buf0), 0)
     var root_off = Int(fr[0] >> 2)
     var body = _tail(buf0, fr[1])
-    var sig = hmac_sha256(SECRET, preimage(root_off, body))
+    var sig = hmac_sha256_preimage(SECRET, root_off, body)
     return serialize_claims_graph_with_header(a, Jws(alg, Optional[String](String(KID)), sig^))
 
 # ── Verify ───────────────────────────────────────────────────────────────────────
@@ -209,7 +242,7 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
         # Gate (verify-before-parse): pin algorithm, recompute HMAC.
         if hdr.algorithm != String("HS256"):
             raise Error("GATE (verify-before-parse)|BadAlg")
-        var expected = hmac_sha256(secret, preimage(root_off, body))
+        var expected = hmac_sha256_preimage(secret, root_off, body)
         var ok = len(hdr.signature) == len(expected)
         if ok:
             var diff = 0
@@ -319,7 +352,7 @@ def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
     # bytes (in the same builder) to build the signed header — no re-serialize, no copy.
     @parameter
     def gate(root_off: Int, body: List[UInt8]) raises -> Jws:
-        var sig = hmac_sha256(SECRET, preimage(root_off, body))
+        var sig = hmac_sha256_preimage(SECRET, root_off, body)
         return Jws(alg, Optional[String](String(KID)), sig^)
     return serialize_claims_graph_with_header_direct[gate](n^)
 
