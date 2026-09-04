@@ -87,12 +87,15 @@ mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []
 Verify_Ctx :: struct { secret: string, reason: string }
 
 // Gate (runs before the body is parsed): alg pinned + constant-time HMAC check.
-gate :: proc(ctx: rawptr, h: tok.Jws_Value, root_offset: int, body: []u8) -> bool {
+// `h` is the lazy header accessor — read algorithm/signature straight from the buffer
+// (zero-copy borrows), no eager restore and key_id never touched.
+gate :: proc(ctx: rawptr, h: tok.Jws_Accessor, root_offset: int, body: []u8) -> bool {
 	c := cast(^Verify_Ctx)ctx
-	if h.algorithm != "HS256" { c.reason = "BadAlg"; return false }
+	blk := tok.jws_block(h)                                   // parse field positions once
+	if tok.jws_algorithm(h, blk) != "HS256" { c.reason = "BadAlg"; return false }
 	msg := preimage(root_offset, body)
 	defer delete(msg)
-	if !hmac.verify(hash.Algorithm.SHA256, h.signature, msg, transmute([]u8)c.secret) {
+	if !hmac.verify(hash.Algorithm.SHA256, tok.jws_signature(h, blk), msg, transmute([]u8)c.secret) {
 		c.reason = "BadSignature"; return false
 	}
 	return true
@@ -104,7 +107,7 @@ Verdict :: struct { ok: bool, reason: string, stage: string, acc: tok.Claims_Acc
 // zero-copy `Claims_Accessor` rooted past the packed header — no eager restore. Mirrors
 // the generated `claims_from_bytes_with_header` framing, but hands back the accessor.
 lazy_root_with_header :: proc(data: []u8, ctx: rawptr,
-	gate: proc(ctx: rawptr, h: tok.Jws_Value, root_offset: int, body: []u8) -> bool,
+	gate: proc(ctx: rawptr, h: tok.Jws_Accessor, root_offset: int, body: []u8) -> bool,
 ) -> (tok.Claims_Accessor, bool) {
 	framing, rl := dr.read_leb(data, 0)
 	if framing & 1 != 1 { return {}, false }
@@ -112,7 +115,7 @@ lazy_root_with_header :: proc(data: []u8, ctx: rawptr,
 	stored_offset := int(framing >> 2)
 	hcs, hcsb := dr.read_leb(data, rl)
 	h := hcsb + int(hcs)
-	header := tok.restore_jws(tok.Jws_Accessor{buf = data, pos = rl})
+	header := tok.Jws_Accessor{buf = data, pos = rl}          // lazy view — no eager restore
 	body := data[rl + h:]
 	if !gate(ctx, header, stored_offset - h, body) { return {}, false }
 	return tok.Claims_Accessor{buf = data, pos = rl + stored_offset}, true
