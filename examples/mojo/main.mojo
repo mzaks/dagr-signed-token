@@ -169,7 +169,7 @@ def hmac_sha256(key: String, msg: List[UInt8]) -> List[UInt8]:
 # HMAC over the signing preimage `LE_u64(root_off) ++ body` — streamed, so the preimage
 # is never materialised as a List (the 8-byte prefix lives on the stack; the body Span is
 # hashed in place). Assumes a <=64-byte key (the demo secret). This is the verify/mint hot path.
-def hmac_sha256_preimage(key: String, root_off: Int, body: List[UInt8]) -> List[UInt8]:
+def hmac_sha256_preimage(key: String, root_off: Int, body: Span[UInt8, _]) -> List[UInt8]:
     var kw = _kvecs()
     var kb = String(key).as_bytes()
     var ipad = InlineArray[UInt8, 64](fill=0x36)
@@ -181,7 +181,7 @@ def hmac_sha256_preimage(key: String, root_off: Int, body: List[UInt8]) -> List[
     for i in range(8):
         le[i] = UInt8((v >> UInt64(i * 8)) & 0xFF)
     var inner = Sha256()
-    inner.update(Span(ipad), kw); inner.update(Span(le), kw); inner.update(Span(body), kw)
+    inner.update(Span(ipad), kw); inner.update(Span(le), kw); inner.update(body, kw)
     var ih = inner.finalize(kw)
     var outer = Sha256(); outer.update(Span(opad), kw); outer.update(Span(ih), kw)
     var fh = outer.finalize(kw)
@@ -228,7 +228,7 @@ def mint(alg: String, exp: UInt64) raises -> List[UInt8]:
     var fr = read_leb(Span(buf0), 0)
     var root_off = Int(fr[0] >> 2)
     var body = _tail(buf0, fr[1])
-    var sig = hmac_sha256_preimage(SECRET, root_off, body)
+    var sig = hmac_sha256_preimage(SECRET, root_off, Span(body))
     return serialize_claims_graph_with_header(a, Jws(alg, Optional[String](String(KID)), sig^))
 
 # ── Verify ───────────────────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
     # runs this gate, and only THEN hands back a lazy ClaimsAccessor — no hand-rolled
     # offset math, and it validates the framing bits we used to skip.
     @parameter
-    def gate(hdr: Jws, root_off: Int, body: List[UInt8]) raises:
+    def gate(hdr: Jws, root_off: Int, body: Span[UInt8, ImmutAnyOrigin]) raises:
         # Gate (verify-before-parse): pin algorithm, recompute HMAC.
         if hdr.algorithm != String("HS256"):
             raise Error("GATE (verify-before-parse)|BadAlg")
@@ -352,7 +352,7 @@ def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
     # bytes (in the same builder) to build the signed header — no re-serialize, no copy.
     @parameter
     def gate(root_off: Int, body: List[UInt8]) raises -> Jws:
-        var sig = hmac_sha256_preimage(SECRET, root_off, body)
+        var sig = hmac_sha256_preimage(SECRET, root_off, Span(body))
         return Jws(alg, Optional[String](String(KID)), sig^)
     return serialize_claims_graph_with_header_direct[gate](n^)
 

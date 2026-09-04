@@ -136,7 +136,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | ts | jwt | 1640 | 2070 | 395 |
 | python | dagr | 60455 | 48847 | 207 |
 | python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 2470 | 2050 | 207 |
+| mojo | dagr | 2400 | 1550 | 207 |
 | odin | dagr | 2243 | 303 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
@@ -178,8 +178,10 @@ via `llvm_intrinsic`, the same hardware `ring` uses, no FFI; Swift = CryptoKit, 
 `node:crypto`, Python = `hashlib`, Odin = `core:crypto`), so cross-language `verify` times
 reflect the platform's crypto, not only the format read. (Mojo went further: a streaming
 HMAC keeps the SHA state + ipad/opad on the stack (`InlineArray`) and hashes the message
-Span in place — no per-message padding copy, no inner/outer/preimage Lists — taking verify
-7920 → 2050 ns across the hardware-SHA + streaming changes.)
+Span in place — no per-message padding copy, no inner/outer/preimage Lists — and the
+generated reader hands the gate a zero-copy `Span` subview of the buffer (not a `List`).
+Together these took Mojo verify **7920 → ~1550 ns** over the hardware-SHA + streaming +
+zero-copy-body changes.)
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
