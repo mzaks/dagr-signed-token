@@ -129,8 +129,8 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 1407 | **237** | **207** |
-| rust | jwt (`jsonwebtoken`) | **875** | 1485 | 395 |
+| rust | dagr | 974 | **235** | **207** |
+| rust | jwt (`jsonwebtoken`) | 858 | 1437 | 395 |
 | swift | dagr | 5312 | 1957 | 207 |
 | ts | dagr | 10135 | 3276 | 207 |
 | ts | jwt | 1713 | 2140 | 395 |
@@ -142,21 +142,23 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
 inflation). On *speed*, with crypto matched (`ring` both sides), Dagr **verifies ~6×
-faster** than a real `jsonwebtoken` (237 vs 1485 ns) — verify-before-parse + zero-alloc
+faster** than a real `jsonwebtoken` (235 vs 1437 ns) — verify-before-parse + zero-alloc
 lazy read vs base64-decode + full serde deserialize; that's the hot path for a token you
-mint once and check on every request. `jsonwebtoken` still **mints ~1.6× faster** (875 vs
-1407 ns): serializing flat JSON is cheaper than building even a direct graph, and Dagr's
-mint is currently allocation-heavy (see profiling below). In Node/CPython the heavily-
-optimized *native* `JSON`+crypto beats the interpreted Dagr codec outright. Dagr's
-durable wins are **size**, **cross-language byte-identity**, **type-safe reads**, and
-**very fast verify** in compiled targets.
+mint once and check on every request. **Mint is now ~on par** (974 vs 858 ns) after the
+serializer was profiled and rebuilt (see below). In Node/CPython the heavily-optimized
+*native* `JSON`+crypto beats the interpreted Dagr codec outright. Dagr's durable wins are
+**size**, **cross-language byte-identity**, **type-safe reads**, and **fast verify** in
+compiled targets.
 
-**Profiling.** `dst profile` (Rust, `--features bench`) breaks the mint into phases. Two
-findings drove the setup above: (1) RustCrypto `sha2` ran its *software* backend here and
-was **~4.6× slower than `ring`** (745 vs 160 ns for one HMAC) — so both sides now use
-`ring`; (2) the remaining Dagr mint cost is **serialization** (~830 ns), which allocates
-three `DagrBuilder`s (body/header/framing) + copies per token — the target for a reusable,
-right-sized builder (spec 31 §4.3).
+**Profiling** (`dst profile`, Rust, `--features bench`) drove two changes: (1) RustCrypto
+`sha2` ran its *software* backend here — **~4.6× slower than `ring`** (745 vs 160 ns per
+HMAC) — so both sides now use `ring`; (2) the direct serializer built the token in **three**
+`DagrBuilder`s (body/header/framing) with three `finalize()` copies. Since the builder
+grows back-to-front and the direct store is dedup-free, it now uses **one** builder —
+write the body, sign it *in place*, then prepend the header + framing, and finalize once.
+That cut serialize ~830 → ~570 ns and mint ~1400 → ~970 ns, closing the gap to JWT. (The
+generated serializer keeps the 3-builder path only for aligned graphs, whose header
+inflation needs the finalized body length.)
 
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
 is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo

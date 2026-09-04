@@ -235,7 +235,7 @@ fn profile() {
     // A bare DagrBuilder::new() — `to_bytes_with_header` allocates 3 of these (body, header, framing).
     let t_alloc = time_ns(n, || { std::hint::black_box(dagr_signed_token::dagr_runtime::DagrBuilder::new()); });
     println!("PROFILE rust mint_direct total={t_full}ns = build_tree={t_build}ns + serialize(no-hmac)={t_ser}ns + hmac(ring)={t_hmac}ns");
-    println!("        DagrBuilder::new()={t_alloc}ns each × 3 per serialize (body/header/framing)");
+    println!("        DagrBuilder::new()={t_alloc}ns — now 1 builder for the whole [framing][header][body], finalized once");
 }
 
 fn main() {
