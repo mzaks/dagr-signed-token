@@ -127,9 +127,11 @@ impl Rejected {
 fn verify(token: &[u8], secret: &[u8], now: u64) -> Result<(), Rejected> {
     let reason = std::cell::Cell::new(None);
     let root = token_lazy::read_root_with_header(token, |h, root_offset, body| {
-        if h.algorithm != "HS256" { reason.set(Some(Rejected::BadAlg)); return Err(DagrError::InvalidData); }
+        // `h` is the zero-alloc header view — algorithm() borrows &str, signature() borrows
+        // &[u8] straight from the buffer (no String/Vec), and key_id is never touched.
+        if h.algorithm()? != "HS256" { reason.set(Some(Rejected::BadAlg)); return Err(DagrError::InvalidData); }
         let expected = hmac_sha256(secret, &preimage(root_offset, body));
-        if !ct_eq(&h.signature, &expected) { reason.set(Some(Rejected::BadSignature)); return Err(DagrError::InvalidData); }
+        if !ct_eq(h.signature()?, &expected) { reason.set(Some(Rejected::BadSignature)); return Err(DagrError::InvalidData); }
         Ok(())
     });
     let c = match root { Ok(c) => c, Err(_) => return Err(reason.take().unwrap_or(Rejected::BadSignature)) };
