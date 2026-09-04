@@ -284,13 +284,7 @@ def main() raises:
     if len(args) >= 2 and args[1] == "direct":
         var a = mint(String("HS256"), EXP)
         var d = mint_direct(String("HS256"), EXP)
-        var eq = len(a) == len(d)
-        if eq:
-            for i in range(len(a)):
-                if a[i] != d[i]:
-                    eq = False
-                    break
-        if eq:
+        if a == d:                                   # List[UInt8] ==: length + elementwise
             print("[mojo] direct == arena (" + String(len(d)) + " bytes) — spec 31 gate OK")
         else:
             print("[mojo] direct != arena (arena " + String(len(a)) + " vs direct " + String(len(d)) + ")")
