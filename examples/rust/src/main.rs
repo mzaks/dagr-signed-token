@@ -61,9 +61,10 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
 /// plain value tree, arena-free. Must be byte-identical to `mint` — see the
 /// `direct_equals_arena` test below (spec §6 gate). Exercised only by that test, so
 /// it reads as dead code in the CLI (non-test) build.
+// Build the direct value tree (the allocation-heavy part: Strings, Vecs, Boxes).
 #[cfg_attr(not(test), allow(dead_code))]
-fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
-    use dagr_signed_token::token::{direct, Token};
+fn build_direct(exp: u64) -> dagr_signed_token::token::direct::Claims {
+    use dagr_signed_token::token::direct;
     // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
     let custom = direct::Json::Object(vec![
         direct::JsonMember { key: "tenant".into(), value: Some(direct::Json::String("acme".into())) },
@@ -74,7 +75,7 @@ fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
         direct::JsonMember { key: "mfa".into(), value: Some(direct::Json::Bool(true)) },
         direct::JsonMember { key: "fp".into(), value: Some(direct::Json::Data(vec![0xDE, 0xAD, 0xBE, 0xEF])) },
     ]);
-    let claims = direct::Claims {
+    direct::Claims {
         subject: Some("user-42".into()),
         issuer: Some("https://issuer.dagr.one".into()),
         audience: Some("dagr-api".into()),
@@ -82,8 +83,13 @@ fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
         expires_at: exp,
         scopes: vec!["read:profile".into(), "write:posts".into()],
         custom: Some(custom),
-    };
-    Token::to_bytes_with_header(&claims, |root_offset, body| Jws {
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
+    use dagr_signed_token::token::Token;
+    Token::to_bytes_with_header(&build_direct(exp), |root_offset, body| Jws {
         algorithm: alg.into(),
         key_id: Some(KID.into()),
         signature: hmac_sha256(secret, &preimage(root_offset, body)).to_vec(),
@@ -206,11 +212,39 @@ fn bench() {
     println!("BENCH rust jwt mint={jm} verify={jv} size={}", jtok.len());
 }
 
+// Break `mint_direct` into phases — build the value tree, serialize it (no HMAC), and
+// HMAC alone — so we can see where the mint time goes. `to_bytes_with_header` borrows the
+// tree, so serialize is timed over a pre-built one.
+#[cfg(feature = "bench")]
+fn profile() {
+    use dagr_signed_token::token::Token;
+    let n = 200_000u32;
+    let claims = build_direct(EXP);
+    let t_build = time_ns(n, || { std::hint::black_box(build_direct(EXP)); });
+    let sig = [0u8; 32].to_vec();
+    let t_ser = time_ns(n, || {
+        let out = Token::to_bytes_with_header(std::hint::black_box(&claims), |_o, _b| Jws {
+            algorithm: "HS256".into(), key_id: Some(KID.into()), signature: sig.clone(),
+        }).unwrap();
+        std::hint::black_box(out);
+    });
+    let body = mint_direct(SECRET, "HS256", EXP);
+    let pre = preimage(10, &body);
+    let t_hmac = time_ns(n, || { std::hint::black_box(hmac_sha256(SECRET, std::hint::black_box(&pre))); });
+    let t_full = time_ns(n, || { std::hint::black_box(mint_direct(SECRET, "HS256", EXP)); });
+    // A bare DagrBuilder::new() — `to_bytes_with_header` allocates 3 of these (body, header, framing).
+    let t_alloc = time_ns(n, || { std::hint::black_box(dagr_signed_token::dagr_runtime::DagrBuilder::new()); });
+    println!("PROFILE rust mint_direct total={t_full}ns = build_tree={t_build}ns + serialize(no-hmac)={t_ser}ns + hmac(ring)={t_hmac}ns");
+    println!("        DagrBuilder::new()={t_alloc}ns each × 3 per serialize (body/header/framing)");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         #[cfg(feature = "bench")]
         Some("bench") => { bench(); return; }
+        #[cfg(feature = "bench")]
+        Some("profile") => { profile(); return; }
         Some("emit") => {
             std::fs::write(&args[2], mint(SECRET, "HS256", EXP)).expect("write");
             println!("[rust] emitted -> {}", args[2]);

@@ -11,16 +11,15 @@ edition = "2024"
 # unchanged either way.
 [dependencies]
 dagr_signed_token = { path = "../../gen/rust" }
-# Bench-only (all optional): `real-crypto` swaps Dagr's HMAC to RustCrypto; `bench`
-# additionally pulls `jsonwebtoken` — the standard Rust JWT crate — as the proper
-# real-world baseline (serde-derived claims, full signature/exp/aud validation).
-sha2 = { version = "0.10", optional = true }
-hmac = { version = "0.12", optional = true }
+# Bench-only (all optional): `real-crypto` swaps Dagr's HMAC to `ring` (asm SHA-256 — the
+# same crate `jsonwebtoken` uses, so the crypto is matched, not a soft reference impl);
+# `bench` adds `jsonwebtoken` as the real-world JWT baseline. The demo stays zero-dep.
 jsonwebtoken = { version = "9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+ring = { version = "0.17", optional = true }
 
 [features]
-real-crypto = ["dep:sha2", "dep:hmac"]
+real-crypto = ["dep:ring"]
 bench = ["real-crypto", "dep:jsonwebtoken", "dep:serde"]
 
 [[bin]]

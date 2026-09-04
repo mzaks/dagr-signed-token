@@ -70,15 +70,13 @@ pub fn sha256(msg: &[u8]) -> [u8; 32] {
 
 /// HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT.
 ///
-/// `real-crypto` (bench only): RustCrypto `hmac`+`sha2` — hardware-accelerated,
-/// NIST-validated, the same crate a real JWT lib uses. Same bytes as the hand-rolled
-/// path below (HMAC-SHA256 is a standard), just realistic timings.
+/// `real-crypto` (bench only): `ring` — hand-written asm SHA-256, the same crate
+/// `jsonwebtoken` uses, so the crypto is matched. (Profiling showed RustCrypto `sha2`
+/// runs its *software* backend here, ~4.6× slower.) Same bytes as the hand-rolled path.
 #[cfg(feature = "real-crypto")]
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(msg);
-    mac.finalize().into_bytes().into()
+    let k = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+    ring::hmac::sign(&k, msg).as_ref().try_into().expect("HMAC-SHA256 is 32 bytes")
 }
 
 /// Default (zero-dependency demo): hand-rolled scalar HMAC over `sha256` above.

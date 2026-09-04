@@ -123,38 +123,46 @@ Rust, TypeScript, and Python also bench an **equivalent classic HS256 JWT** with
 same claims, so the delta isolates the *format*. The **Rust** JWT baseline is the
 **`jsonwebtoken` crate** — the standard Rust JWT library (serde-derived claims, full
 signature + `exp` + `aud` validation) — for a proper real-world comparison; the Rust
-Dagr side uses RustCrypto `hmac`+`sha2` (both behind the bench-only `bench` feature, so
-the demo stays zero-dep). Representative run (Apple Silicon; ns/op — ratios, not absolutes):
+Dagr side uses **`ring`** for HMAC-SHA256 (the same asm crypto `jsonwebtoken` uses — so
+the crypto is matched, see profiling note). Both are behind the bench-only `bench`
+feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op — ratios):
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 1912 | **724** | **207** |
-| rust | jwt (`jsonwebtoken`) | **835** | 1406 | 395 |
-| swift | dagr | 5217 | 1903 | 207 |
-| ts | dagr | 10154 | 3466 | 207 |
-| ts | jwt | 1600 | 2157 | 395 |
-| python | dagr | 59947 | 48299 | 207 |
-| python | jwt | 5229 | 4757 | 395 |
-| mojo | dagr | 11745 | 7744 | 207 |
-| odin | dagr | 2057 | **292** | 207 |
+| rust | dagr | 1407 | **237** | **207** |
+| rust | jwt (`jsonwebtoken`) | **875** | 1485 | 395 |
+| swift | dagr | 5312 | 1957 | 207 |
+| ts | dagr | 10135 | 3276 | 207 |
+| ts | jwt | 1713 | 2140 | 395 |
+| python | dagr | 60455 | 48847 | 207 |
+| python | jwt | 5320 | 4971 | 395 |
+| mojo | dagr | 12357 | 7764 | 207 |
+| odin | dagr | 2243 | 303 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
-inflation). On *speed* the split is honest and instructive: against a real
-`jsonwebtoken`, Dagr **verifies ~2× faster** (724 vs 1406 ns — verify-before-parse +
-zero-alloc lazy read beats base64-decode + full serde deserialize), but `jsonwebtoken`
-**mints ~2× faster** (835 vs 1912 ns — serializing flat JSON is cheaper than building a
-graph, even a direct one). Odin verifies in **292 ns**. In Node/CPython the heavily-
+inflation). On *speed*, with crypto matched (`ring` both sides), Dagr **verifies ~6×
+faster** than a real `jsonwebtoken` (237 vs 1485 ns) — verify-before-parse + zero-alloc
+lazy read vs base64-decode + full serde deserialize; that's the hot path for a token you
+mint once and check on every request. `jsonwebtoken` still **mints ~1.6× faster** (875 vs
+1407 ns): serializing flat JSON is cheaper than building even a direct graph, and Dagr's
+mint is currently allocation-heavy (see profiling below). In Node/CPython the heavily-
 optimized *native* `JSON`+crypto beats the interpreted Dagr codec outright. Dagr's
-durable wins are **size**, **cross-language byte-identity**, and **type-safe reads** —
-plus fast *verify* in compiled targets, which is the hot path for a token you mint once
-and check on every request.
+durable wins are **size**, **cross-language byte-identity**, **type-safe reads**, and
+**very fast verify** in compiled targets.
 
-**Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph,
-JWT is base64url JSON). Crypto differs per language (Rust = RustCrypto for Dagr /
-`jsonwebtoken`'s ring for JWT — both production-grade; Mojo hand-rolls scalar SHA-256;
-Swift = CryptoKit, TS = `node:crypto`, Python = `hashlib`, Odin = `core:crypto`), so
-cross-language `verify` times reflect the platform's crypto, not only the format read.
+**Profiling.** `dst profile` (Rust, `--features bench`) breaks the mint into phases. Two
+findings drove the setup above: (1) RustCrypto `sha2` ran its *software* backend here and
+was **~4.6× slower than `ring`** (745 vs 160 ns for one HMAC) — so both sides now use
+`ring`; (2) the remaining Dagr mint cost is **serialization** (~830 ns), which allocates
+three `DagrBuilder`s (body/header/framing) + copies per token — the target for a reusable,
+right-sized builder (spec 31 §4.3).
+
+**Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
+is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo
+hand-rolls scalar SHA-256; Swift = CryptoKit, TS = `node:crypto`, Python = `hashlib`,
+Odin = `core:crypto`), so cross-language `verify` times reflect the platform's crypto,
+not only the format read.
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
