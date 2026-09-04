@@ -11,7 +11,7 @@ from std.sys.intrinsics import llvm_intrinsic
 from std.time import perf_counter_ns
 from std.memory import ArcPointer, unsafe_memcpy, unsafe_memset_zero
 from token_arena import TokenArena
-from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header
+from token_serde import Jws, JwsAccessor, serialize_claims_graph, serialize_claims_graph_with_header
 from token_direct import DirectClaims, DirectJson, DirectJsonMember, serialize_claims_graph_direct, serialize_claims_graph_with_header_direct
 from token_reader import ClaimsAccessor, JsonPackedView, read_claims_root_with_header
 from dagr_reader import read_leb
@@ -267,16 +267,18 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
     # runs this gate, and only THEN hands back a lazy ClaimsAccessor — no hand-rolled
     # offset math, and it validates the framing bits we used to skip.
     @parameter
-    def gate(hdr: Jws, root_off: Int, body: Span[UInt8, ImmutAnyOrigin]) raises:
-        # Gate (verify-before-parse): pin algorithm, recompute HMAC.
-        if hdr.algorithm != String("HS256"):
+    def gate(hdr: JwsAccessor[ImmutAnyOrigin], root_off: Int, body: Span[UInt8, ImmutAnyOrigin]) raises:
+        # Gate (verify-before-parse): pin algorithm, recompute HMAC. `hdr` is a lazy view —
+        # only the fields we read are decoded (key_id is never touched).
+        if hdr.algorithm_view() != "HS256":               # zero-alloc: compares a slice, no String
             raise Error("GATE (verify-before-parse)|BadAlg")
         var expected = hmac_sha256_preimage(secret, root_off, body)
-        var ok = len(hdr.signature) == len(expected)
+        var sig = hdr.signature_view()                    # zero-alloc: a Span into the buffer, no List
+        var ok = len(sig) == len(expected)
         if ok:
             var diff = 0
             for i in range(len(expected)):
-                diff |= Int(hdr.signature[i] ^ expected[i])
+                diff |= Int(sig[i] ^ expected[i])
             ok = diff == 0
         if not ok:
             raise Error("GATE (verify-before-parse)|BadSignature")
@@ -430,7 +432,7 @@ def profile() raises:
     var sink: UInt64 = 0
 
     @parameter
-    def noop(hdr: Jws, ro: Int, b: Span[UInt8, ImmutAnyOrigin]) raises:
+    def noop(hdr: JwsAccessor[ImmutAnyOrigin], ro: Int, b: Span[UInt8, ImmutAnyOrigin]) raises:
         pass
 
     # 1) full verify
