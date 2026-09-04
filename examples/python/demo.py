@@ -8,11 +8,14 @@ is the standard-library `hmac`/`hashlib` — no third-party dependencies.
     python3 demo.py emit  PATH  → write a valid token
     python3 demo.py verify PATH → verify+decode a token minted by any language
 """
+import base64
 import hashlib
 import hmac
 import importlib.util
+import json
 import os
 import sys
+import time
 
 # The generated module is gen/python/token.py — but `token` is also a Python STDLIB
 # module (used by dataclasses/tokenize), so we must NOT shadow it. Keep gen/python at
@@ -118,8 +121,75 @@ def report(label, run):
         print("  %-20s REJECT  [%s] %s" % (label, e.stage, e.reason))
 
 
+# ── Classic JWT (HS256) baseline for the benchmark — same claims, same crypto, so the
+# delta isolates the format. stdlib json + base64url; verify recomputes the MAC then
+# json.loads the payload (the work Dagr's binary body + lazy read avoid).
+def _b64(b: bytes) -> bytes:
+    return base64.urlsafe_b64encode(b).rstrip(b"=")
+
+
+def _unb64(s: bytes) -> bytes:
+    return base64.urlsafe_b64decode(s + b"=" * (-len(s) % 4))
+
+
+def jwt_mint(secret: bytes, alg: str, exp: int) -> bytes:
+    header = _b64(json.dumps({"alg": alg, "typ": "JWT", "kid": KID}, separators=(",", ":")).encode())
+    payload = _b64(json.dumps({
+        "sub": "user-42", "iss": "https://issuer.dagr.one", "aud": "dagr-api", "iat": 1760000000, "exp": exp,
+        "scopes": ["read:profile", "write:posts"], "tenant": "acme", "roles": ["admin", "billing"], "mfa": True, "fp": "0xdeadbeef",
+    }, separators=(",", ":")).encode())
+    si = header + b"." + payload
+    return si + b"." + _b64(hmac_sha256(secret, si))
+
+
+def jwt_verify(token: bytes, secret: bytes, now: int) -> bool:
+    si, _, sig_b64 = token.rpartition(b".")
+    if not hmac.compare_digest(_unb64(sig_b64), hmac_sha256(secret, si)):
+        return False
+    header_b64, _, payload_b64 = si.partition(b".")
+    if json.loads(_unb64(header_b64)).get("alg") != "HS256":
+        return False
+    payload = json.loads(_unb64(payload_b64))
+    if now >= payload["exp"]:
+        return False
+    return payload.get("aud") == "dagr-api"
+
+
+def _time_ns(iters: int, f) -> int:
+    for _ in range(iters // 10):    # warmup
+        f()
+    t = time.perf_counter_ns()
+    for _ in range(iters):
+        f()
+    return (time.perf_counter_ns() - t) // iters
+
+
+def bench():
+    n = 5000
+    tok = mint(SECRET, "HS256", EXP)
+    jtok = jwt_mint(SECRET, "HS256", EXP)
+    # Correctness gate (dagr verify raises Rejected on failure; returns claims on success).
+    verify(tok, SECRET, NOW)
+    assert jwt_verify(jtok, SECRET, NOW)
+    try:
+        verify(mint(SECRET, "HS256", NOW - 1), SECRET, NOW)
+        raise AssertionError("expired must reject")
+    except Rejected:
+        pass
+    assert not jwt_verify(jwt_mint(SECRET, "HS256", NOW - 1), SECRET, NOW)
+    dm = _time_ns(n, lambda: mint(SECRET, "HS256", EXP))
+    dv = _time_ns(n, lambda: verify(tok, SECRET, NOW))
+    print("BENCH python dagr mint=%d verify=%d size=%d" % (dm, dv, len(tok)))
+    jm = _time_ns(n, lambda: jwt_mint(SECRET, "HS256", EXP))
+    jv = _time_ns(n, lambda: jwt_verify(jtok, SECRET, NOW))
+    print("BENCH python jwt mint=%d verify=%d size=%d" % (jm, jv, len(jtok)))
+
+
 def main():
     argv = sys.argv
+    if len(argv) >= 2 and argv[1] == "bench":
+        bench()
+        return
     if len(argv) >= 3 and argv[1] == "emit":
         with open(argv[2], "wb") as f:
             f.write(mint(SECRET, "HS256", EXP))

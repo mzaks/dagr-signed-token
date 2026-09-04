@@ -12,6 +12,7 @@ import "core:crypto/hmac"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 import tok "../../gen/odin"
 import dr "../../gen/odin/runtime"
@@ -184,6 +185,26 @@ main :: proc() {
 	w := tok.claims_writer_make()
 	defer tok.claims_writer_destroy(&w)
 
+	if len(args) >= 2 && args[1] == "bench" {
+		// Mint + verify throughput (no JWT baseline in Odin — see Rust/TS/Python for that).
+		n := 50000
+		// mint returns a slice into the reused writer, so COPY the token we verify.
+		m0 := mint(&w, SECRET, "HS256", EXP)
+		tok := make([]u8, len(m0)); copy(tok, m0)
+		if !verify(tok, SECRET, NOW).ok { fmt.eprintln("verify must accept"); os.exit(2) }
+		sink: u64 = 0
+		for _ in 0 ..< n / 10 { m := mint(&w, SECRET, "HS256", EXP); sink += u64(m[0]) }   // warmup
+		t0 := time.tick_now()
+		for _ in 0 ..< n { m := mint(&w, SECRET, "HS256", EXP); sink += u64(m[0]) }
+		dm := time.duration_nanoseconds(time.tick_since(t0)) / i64(n)
+		for _ in 0 ..< n / 10 { if verify(tok, SECRET, NOW).ok { sink += 1 } }
+		t1 := time.tick_now()
+		for _ in 0 ..< n { if verify(tok, SECRET, NOW).ok { sink += 1 } }
+		dv := time.duration_nanoseconds(time.tick_since(t1)) / i64(n)
+		fmt.printf("BENCH odin dagr mint=%d verify=%d size=%d\n", dm, dv, len(tok))
+		if sink == 12345678 { fmt.println("") }
+		return
+	}
 	if len(args) >= 3 && args[1] == "emit" {
 		token := mint(&w, SECRET, "HS256", EXP)
 		if err := os.write_entire_file(args[2], token); err != nil { fmt.eprintln("write failed"); os.exit(2) }

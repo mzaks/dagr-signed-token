@@ -37,9 +37,10 @@ examples/
   swift/             main.swift + Crypto.swift, compiled against gen/swift sources
   typescript/        demo.ts — imports gen/typescript, HMAC via node:crypto
   python/            demo.py — imports gen/python (reflective), HMAC via stdlib hmac/hashlib
-  mojo/              main.mojo — imports gen/mojo, HMAC + file I/O via Python interop
+  mojo/              main.mojo — imports gen/mojo, hand-rolled HMAC + native file I/O
   odin/              main.odin — imports gen/odin + its runtime, HMAC via core:crypto/hmac
 run_cross_lang.sh    build → mint in each language → N×N verify → assert byte-identity
+run_bench.sh         build optimized → 50k-rep mint/verify per language → ns/op table
 ```
 
 ## Prerequisites
@@ -107,6 +108,42 @@ Verification:
   … (36 combinations: every one of 6 languages verifies every language's token) …
 == ALL GREEN ==
 ```
+
+## Benchmarks
+
+```bash
+./run_bench.sh      # builds each language optimized → 50k-rep mint/verify → table
+```
+
+Each language mints + verifies in-process (warm-up + 50k reps, correctness-gated).
+Rust, TypeScript, and Python also bench an **equivalent classic HS256 JWT** — same
+claims, same HMAC-SHA256 — so the delta isolates the *format*. Representative run
+(Apple Silicon; ns/op — treat as ratios, not absolutes):
+
+| lang | impl | mint (ns) | verify (ns) | size (B) |
+|---|---|--:|--:|--:|
+| rust | dagr | 2564 | **1066** | **207** |
+| rust | jwt | 2071 | 2071 | 395 |
+| swift | dagr | 9546 | 1842 | 207 |
+| ts | dagr | 10815 | 3146 | 207 |
+| ts | jwt | 1669 | 2101 | 395 |
+| python | dagr | 59335 | 47737 | 207 |
+| python | jwt | 5269 | 4990 | 395 |
+| mojo | dagr | 11328 | 8107 | 207 |
+| odin | dagr | 2242 | **287** | 207 |
+
+**What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
+in every language (schema-driven: field names never hit the wire, no base64 33 %
+inflation). On *speed* the picture is honestly mixed: in compiled languages Dagr's
+verify-before-parse + zero-alloc lazy read wins (Rust verify **2× faster** than its
+JWT; Odin verifies in **287 ns**), but in Node/CPython the heavily-optimized *native*
+`JSON`+crypto beats the interpreted Dagr codec. Dagr's durable wins are **size**,
+**cross-language byte-identity**, and **type-safe reads** — not raw speed in every runtime.
+
+**Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph,
+JWT is base64url JSON). Crypto also differs per language (Rust/Mojo hand-roll scalar
+SHA-256; Swift = CryptoKit, TS = `node:crypto`, Python = `hashlib`, Odin = `core:crypto`),
+so `verify` time reflects the platform's crypto, not only the format read.
 
 ## Key properties
 

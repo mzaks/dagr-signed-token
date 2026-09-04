@@ -118,8 +118,60 @@ function report(label: string, v: Verdict): void {
   }
 }
 
+// ── Classic JWT (HS256) baseline for the benchmark — same claims, same crypto, so the
+// delta isolates the format (compact base64url JSON vs Dagr's binary graph). Uses Node's
+// built-in JSON + base64url; verify recomputes the MAC then JSON.parses the payload (the
+// work Dagr's binary body + lazy read avoid).
+function jwtMint(alg: string, exp: bigint): string {
+  const header = Buffer.from(JSON.stringify({ alg, typ: "JWT", kid: KID })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({
+    sub: "user-42", iss: "https://issuer.dagr.one", aud: "dagr-api", iat: 1760000000, exp: Number(exp),
+    scopes: ["read:profile", "write:posts"], tenant: "acme", roles: ["admin", "billing"], mfa: true, fp: "0xdeadbeef",
+  })).toString("base64url");
+  const si = `${header}.${payload}`;
+  return `${si}.${createHmac("sha256", SECRET).update(si).digest().toString("base64url")}`;
+}
+
+function jwtVerify(token: string, now: bigint, secret: Buffer): boolean {
+  const dot2 = token.lastIndexOf(".");
+  const si = token.slice(0, dot2);
+  const sig = Buffer.from(token.slice(dot2 + 1), "base64url");
+  const expected = createHmac("sha256", secret).update(si).digest();
+  if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return false;
+  const dot1 = si.indexOf(".");
+  const header = JSON.parse(Buffer.from(si.slice(0, dot1), "base64url").toString());
+  if (header.alg !== "HS256") return false;
+  const payload = JSON.parse(Buffer.from(si.slice(dot1 + 1), "base64url").toString());
+  if (now >= BigInt(payload.exp)) return false;
+  return payload.aud === "dagr-api";
+}
+
+function timeNs(iters: number, f: () => void): bigint {
+  for (let i = 0; i < iters / 10; i++) f();          // warmup
+  const t = process.hrtime.bigint();
+  for (let i = 0; i < iters; i++) f();
+  return (process.hrtime.bigint() - t) / BigInt(iters);
+}
+
+function bench(): void {
+  const n = 50_000;
+  const tok = mint("HS256", EXP);
+  const jtok = jwtMint("HS256", EXP);
+  // Correctness gate.
+  if (!verify(tok, NOW, SECRET).ok || !jwtVerify(jtok, NOW, SECRET)) throw new Error("verify must accept");
+  if (verify(mint("HS256", NOW - 1n), NOW, SECRET).ok || jwtVerify(jwtMint("HS256", NOW - 1n), NOW, SECRET)) throw new Error("expired must reject");
+  const dm = timeNs(n, () => { mint("HS256", EXP); });
+  const dv = timeNs(n, () => { verify(tok, NOW, SECRET); });
+  console.log(`BENCH ts dagr mint=${dm} verify=${dv} size=${tok.length}`);
+  const jm = timeNs(n, () => { jwtMint("HS256", EXP); });
+  const jv = timeNs(n, () => { jwtVerify(jtok, NOW, SECRET); });
+  console.log(`BENCH ts jwt mint=${jm} verify=${jv} size=${jtok.length}`);
+}
+
 const [, , cmd, path] = process.argv;
-if (cmd === "direct") {
+if (cmd === "bench") {
+  bench();
+} else if (cmd === "direct") {
   const a = mint("HS256", EXP);
   const d = mintDirect("HS256", EXP);
   const eq = a.length === d.length && a.every((x, i) => x === d[i]);

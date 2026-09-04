@@ -7,6 +7,7 @@
 #   mojo run -I gen/mojo main.mojo emit  PATH  → write a valid token
 #   mojo run -I gen/mojo main.mojo verify PATH → verify+decode a token minted by any language
 from std.sys import argv, exit
+from std.time import perf_counter_ns
 from std.memory import ArcPointer
 from token_arena import TokenArena
 from token_serde import Jws, serialize_claims_graph, serialize_claims_graph_with_header
@@ -291,8 +292,36 @@ def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
     var sig = hmac_sha256(SECRET, preimage(root_off, body))
     return serialize_claims_graph_with_header_direct(n^, Jws(alg, Optional[String](String(KID)), sig^))
 
+# Mint + verify throughput (no JWT baseline in Mojo — see Rust/TS/Python for that).
+def bench() raises:
+    var n = 50000
+    var tok = mint(String("HS256"), EXP)
+    if verify(tok, SECRET, NOW) != String(""):
+        raise Error("dagr verify must accept")
+    if verify(mint(String("HS256"), NOW - 1), SECRET, NOW) == String(""):
+        raise Error("expired must reject")
+    var sink: UInt64 = 0                              # keep results live (defeat DCE)
+    for _ in range(n // 10):
+        var m = mint(String("HS256"), EXP); sink += UInt64(m[0])
+    var t0 = perf_counter_ns()
+    for _ in range(n):
+        var m = mint(String("HS256"), EXP); sink += UInt64(m[0])
+    var dm = Int(perf_counter_ns() - t0) // n
+    for _ in range(n // 10):
+        sink += UInt64(verify(tok, SECRET, NOW).byte_length())
+    var t1 = perf_counter_ns()
+    for _ in range(n):
+        sink += UInt64(verify(tok, SECRET, NOW).byte_length())
+    var dv = Int(perf_counter_ns() - t1) // n
+    print("BENCH mojo dagr mint=" + String(dm) + " verify=" + String(dv) + " size=" + String(len(tok)))
+    if sink == 12345678:
+        print("")
+
 def main() raises:
     var args = argv()
+    if len(args) >= 2 and args[1] == "bench":
+        bench()
+        return
     if len(args) >= 2 and args[1] == "direct":
         var a = mint(String("HS256"), EXP)
         var d = mint_direct(String("HS256"), EXP)

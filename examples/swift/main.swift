@@ -122,9 +122,35 @@ func report(_ label: String, _ r: Result<Token.ClaimsAccessor, Rejected>) {
     }
 }
 
+func timeNs(_ iters: Int, _ f: () -> Void) -> UInt64 {
+    for _ in 0..<(iters / 10) { f() }                    // warmup
+    let clock = ContinuousClock()
+    let start = clock.now
+    for _ in 0..<iters { f() }
+    let (s, attos) = (clock.now - start).components
+    let totalNs = UInt64(s) &* 1_000_000_000 &+ UInt64(attos / 1_000_000_000)
+    return totalNs / UInt64(iters)
+}
+
+// Mint + verify throughput (no JWT baseline in Swift — see Rust/TS/Python for that).
+func bench() throws {
+    let n = 50_000
+    let tok = try mint(secret: SECRET, alg: "HS256", exp: EXP)
+    guard case .success = verify(tok, secret: SECRET, now: NOW) else { fatalError("verify must accept") }
+    guard case .failure = verify(try mint(secret: SECRET, alg: "HS256", exp: NOW - 1), secret: SECRET, now: NOW)
+    else { fatalError("expired must reject") }
+    var sink: UInt64 = 0                                  // keep results live (defeat DCE)
+    let dm = timeNs(n) { sink &+= UInt64((try? mint(secret: SECRET, alg: "HS256", exp: EXP))?.first ?? 0) }
+    let dv = timeNs(n) { if case .success = verify(tok, secret: SECRET, now: NOW) { sink &+= 1 } }
+    print("BENCH swift dagr mint=\(dm) verify=\(dv) size=\(tok.count)")
+    if sink == 12_345_678 { print("") }
+}
+
 do {
     let args = CommandLine.arguments
-    if args.count >= 2, args[1] == "direct" {
+    if args.count >= 2, args[1] == "bench" {
+        try bench()
+    } else if args.count >= 2, args[1] == "direct" {
         let a = try mint(secret: SECRET, alg: "HS256", exp: EXP)
         let d = try mintDirect(secret: SECRET, alg: "HS256", exp: EXP)
         if a == d {

@@ -7,6 +7,7 @@
 //!       dst verify PATH → verify+decode a token minted by any language
 
 mod sha256;
+mod jwt;
 
 use dagr_signed_token::dagr_runtime::DagrError;
 use dagr_signed_token::token::{Json, Jws, TokenArena, TokenGraph};
@@ -168,9 +169,42 @@ fn body_start(data: &[u8]) -> usize {
     rl + hcsb + hcs as usize
 }
 
+// Time `f` over `iters` reps (after a warmup) → nanoseconds per call.
+fn time_ns(iters: u32, mut f: impl FnMut()) -> u128 {
+    for _ in 0..(iters / 10).max(1) { f(); }        // warmup
+    let t = std::time::Instant::now();
+    for _ in 0..iters { f(); }
+    t.elapsed().as_nanos() / iters as u128
+}
+
+// Mint + verify throughput for the Dagr token and an equivalent classic JWT, same
+// claims + HMAC-SHA256. Emits machine-parseable `BENCH …` lines for run_bench.sh.
+fn bench() {
+    let n = 50_000;
+    let tok = mint(SECRET, "HS256", EXP);
+    let jtok0 = jwt::jwt_mint(SECRET, "HS256", EXP);
+    // Correctness gate: both must accept the valid token and reject a tampered/expired one,
+    // else the timings below are meaningless.
+    assert!(verify(&tok, SECRET, NOW).is_ok() && jwt::jwt_verify(&jtok0, SECRET, NOW).is_ok());
+    assert!(verify(&mint(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
+    assert!(jwt::jwt_verify(&jwt::jwt_mint(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
+    let mut bad = jtok0.clone(); let mid = bad.len() / 2; bad[mid] ^= 1;  // flip a payload char
+    assert!(jwt::jwt_verify(&bad, SECRET, NOW).is_err());
+
+    let dm = time_ns(n, || { std::hint::black_box(mint(SECRET, "HS256", EXP)); });
+    let dv = time_ns(n, || { std::hint::black_box(verify(std::hint::black_box(&tok), SECRET, NOW).is_ok()); });
+    println!("BENCH rust dagr mint={dm} verify={dv} size={}", tok.len());
+
+    let jtok = jwt::jwt_mint(SECRET, "HS256", EXP);
+    let jm = time_ns(n, || { std::hint::black_box(jwt::jwt_mint(SECRET, "HS256", EXP)); });
+    let jv = time_ns(n, || { std::hint::black_box(jwt::jwt_verify(std::hint::black_box(&jtok), SECRET, NOW).is_ok()); });
+    println!("BENCH rust jwt mint={jm} verify={jv} size={}", jtok.len());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("bench") => { bench(); return; }
         Some("emit") => {
             std::fs::write(&args[2], mint(SECRET, "HS256", EXP)).expect("write");
             println!("[rust] emitted -> {}", args[2]);
