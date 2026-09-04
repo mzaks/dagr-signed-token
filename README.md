@@ -136,7 +136,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | ts | jwt | 1640 | 2070 | 395 |
 | python | dagr | 60455 | 48847 | 207 |
 | python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 2400 | 1550 | 207 |
+| mojo | dagr | 2050 | 1170 | 207 |
 | odin | dagr | 2243 | 303 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
@@ -178,10 +178,21 @@ via `llvm_intrinsic`, the same hardware `ring` uses, no FFI; Swift = CryptoKit, 
 `node:crypto`, Python = `hashlib`, Odin = `core:crypto`), so cross-language `verify` times
 reflect the platform's crypto, not only the format read. (Mojo went further: a streaming
 HMAC keeps the SHA state + ipad/opad on the stack (`InlineArray`) and hashes the message
-Span in place — no per-message padding copy, no inner/outer/preimage Lists — and the
-generated reader hands the gate a zero-copy `Span` subview of the buffer (not a `List`).
-Together these took Mojo verify **7920 → ~1550 ns** over the hardware-SHA + streaming +
-zero-copy-body changes.)
+Span in place — no per-message padding copy, no inner/outer/preimage Lists — the
+generated reader hands the gate a zero-copy `Span` subview of the buffer (not a `List`),
+and the 64 round constants are `comptime` immediates rather than a per-call heap `List`.
+Together these took Mojo verify **7920 → ~1170 ns**.)
+
+**Why Mojo verify is ~5× Rust's, and why that's expected.** Rust's `228 ns` is `ring` —
+world-class hand-tuned **assembly**; Odin's `303 ns` is `core:crypto` — a tuned **stdlib**
+library. Mojo has no mature crypto library, so its SHA-256/HMAC is **hand-rolled from
+scratch**. The honest apples-to-apples: **Rust's own hand-rolled SHA-256 HMAC (the demo's
+zero-dep default, `src/sha256.rs`) benchmarks at `1177 ns` — essentially identical to
+Mojo's `~1170 ns`.** So the gap is *library-vs-hand-rolled crypto*, **not** a language gap:
+a correct-but-unpipelined SHA lands near ~1.2 µs for this workload in either language, while
+`ring`/stdlib win ~4–6× through asm scheduling and no bounds checks. (Mojo uses hardware
+SHA intrinsics yet only matches Rust's *software* hand-roll — headroom remains if the
+compression chain were interleaved like `ring`'s, but that's out of scope for a demo.)
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
