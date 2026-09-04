@@ -3,10 +3,19 @@ name = "dst-rust-demo"
 version = "0.1.0"
 edition = "2024"
 
-# The only dependency is the generated Dagr crate. The crypto (SHA-256/HMAC) is
-# hand-rolled in src/sha256.rs — the whole demo is dependency-free.
+# The demo is dependency-free: the only dep is the generated Dagr crate, and the crypto
+# (SHA-256/HMAC) is hand-rolled in src/sha256.rs. The `real-crypto` feature (used only by
+# run_bench.sh) swaps HMAC-SHA256 to RustCrypto `hmac`+`sha2` — the same crate a real JWT
+# lib (`jwt`) uses — so the benchmark reflects realistic, hardware-accelerated crypto
+# instead of a scalar reference impl. HMAC-SHA256 is standard, so the token bytes are
+# unchanged either way.
 [dependencies]
 dagr_signed_token = { path = "../../gen/rust" }
+sha2 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+
+[features]
+real-crypto = ["dep:sha2", "dep:hmac"]
 
 [[bin]]
 name = "dst"

@@ -6,6 +6,7 @@
 //! use a vetted library (ring, RustCrypto). The point here is that the *envelope
 //! mechanics* are Dagr's; the algorithm is entirely the caller's choice.
 
+#[cfg(not(feature = "real-crypto"))]
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -18,6 +19,7 @@ const K: [u32; 64] = [
 ];
 
 /// SHA-256 of an arbitrary byte string → 32-byte digest.
+#[cfg(not(feature = "real-crypto"))]
 pub fn sha256(msg: &[u8]) -> [u8; 32] {
     let mut h: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
@@ -67,6 +69,20 @@ pub fn sha256(msg: &[u8]) -> [u8; 32] {
 }
 
 /// HMAC-SHA256 (RFC 2104) → 32-byte tag. This is the "HS256" of JWT.
+///
+/// `real-crypto` (bench only): RustCrypto `hmac`+`sha2` — hardware-accelerated,
+/// NIST-validated, the same crate a real JWT lib uses. Same bytes as the hand-rolled
+/// path below (HMAC-SHA256 is a standard), just realistic timings.
+#[cfg(feature = "real-crypto")]
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(msg);
+    mac.finalize().into_bytes().into()
+}
+
+/// Default (zero-dependency demo): hand-rolled scalar HMAC over `sha256` above.
+#[cfg(not(feature = "real-crypto"))]
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut k = [0u8; BLOCK];
