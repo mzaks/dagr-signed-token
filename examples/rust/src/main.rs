@@ -49,7 +49,7 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     )));
     a.to_bytes_with_header(|root_offset, body| Jws {
         algorithm: alg.into(),
-        keyId: Some(KID.into()),
+        key_id: Some(KID.into()),
         signature: hmac_sha256(secret, &preimage(root_offset, body)).to_vec(),
     })
     .expect("mint")
@@ -83,7 +83,7 @@ fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     };
     Token::to_bytes_with_header(&claims, |root_offset, body| Jws {
         algorithm: alg.into(),
-        keyId: Some(KID.into()),
+        key_id: Some(KID.into()),
         signature: hmac_sha256(secret, &preimage(root_offset, body)).to_vec(),
     })
     .expect("mint direct")
