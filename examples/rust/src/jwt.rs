@@ -46,6 +46,12 @@ pub fn now() -> u64 {
     jsonwebtoken::get_current_timestamp()
 }
 
+/// Construct the JWT claims value (owned Strings/Vecs) — the jsonwebtoken analogue of
+/// Dagr's `build_direct`, for profiling the "build the claims" cost in isolation.
+pub fn build_only(exp: u64) {
+    std::hint::black_box(claims(exp));
+}
+
 pub fn jwt_mint(secret: &[u8], exp: u64) -> Vec<u8> {
     let mut header = Header::new(Algorithm::HS256);
     header.kid = Some("hmac-key-2026".into());

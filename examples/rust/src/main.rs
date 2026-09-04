@@ -69,8 +69,8 @@ fn build_direct(exp: u64) -> dagr_signed_token::token::direct::Claims {
     let custom = direct::Json::Object(vec![
         direct::JsonMember { key: "tenant".into(), value: Some(direct::Json::String("acme".into())) },
         direct::JsonMember { key: "roles".into(), value: Some(direct::Json::Array(vec![
-            Some(Box::new(direct::Json::String("admin".into()))),
-            Some(Box::new(direct::Json::String("billing".into()))),
+            Some(direct::Json::String("admin".into())),
+            Some(direct::Json::String("billing".into())),
         ])) },
         direct::JsonMember { key: "mfa".into(), value: Some(direct::Json::Bool(true)) },
         direct::JsonMember { key: "fp".into(), value: Some(direct::Json::Data(vec![0xDE, 0xAD, 0xBE, 0xEF])) },
@@ -221,6 +221,7 @@ fn profile() {
     let n = 200_000u32;
     let claims = build_direct(EXP);
     let t_build = time_ns(n, || { std::hint::black_box(build_direct(EXP)); });
+    let t_jwt_build = time_ns(n, || { jwt::build_only(EXP); });
     let sig = [0u8; 32].to_vec();
     let t_ser = time_ns(n, || {
         let out = Token::to_bytes_with_header(std::hint::black_box(&claims), |_o, _b| Jws {
@@ -236,6 +237,7 @@ fn profile() {
     let t_alloc = time_ns(n, || { std::hint::black_box(dagr_signed_token::dagr_runtime::DagrBuilder::new()); });
     println!("PROFILE rust mint_direct total={t_full}ns = build_tree={t_build}ns + serialize(no-hmac)={t_ser}ns + hmac(ring)={t_hmac}ns");
     println!("        DagrBuilder::new()={t_alloc}ns — now 1 builder for the whole [framing][header][body], finalized once");
+    println!("        build cost: dagr value tree={t_build}ns  vs  jsonwebtoken claims struct={t_jwt_build}ns");
 }
 
 fn main() {

@@ -129,7 +129,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 974 | **235** | **207** |
+| rust | dagr | 900 | **228** | **207** |
 | rust | jwt (`jsonwebtoken`) | 858 | 1437 | 395 |
 | swift | dagr | 5312 | 1957 | 207 |
 | ts | dagr | 10135 | 3276 | 207 |
@@ -142,9 +142,9 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
 inflation). On *speed*, with crypto matched (`ring` both sides), Dagr **verifies ~6×
-faster** than a real `jsonwebtoken` (235 vs 1437 ns) — verify-before-parse + zero-alloc
+faster** than a real `jsonwebtoken` (228 vs 1437 ns) — verify-before-parse + zero-alloc
 lazy read vs base64-decode + full serde deserialize; that's the hot path for a token you
-mint once and check on every request. **Mint is now ~on par** (974 vs 858 ns) after the
+mint once and check on every request. **Mint is now ~on par** (900 vs 858 ns) after the
 serializer was profiled and rebuilt (see below). In Node/CPython the heavily-optimized
 *native* `JSON`+crypto beats the interpreted Dagr codec outright. Dagr's durable wins are
 **size**, **cross-language byte-identity**, **type-safe reads**, and **fast verify** in
@@ -158,7 +158,11 @@ grows back-to-front and the direct store is dedup-free, it now uses **one** buil
 write the body, sign it *in place*, then prepend the header + framing, and finalize once.
 That cut serialize ~830 → ~570 ns and mint ~1400 → ~970 ns, closing the gap to JWT. (The
 generated serializer keeps the 3-builder path only for aligned graphs, whose header
-inflation needs the finalized body length.)
+inflation needs the finalized body length.) (3) The remaining ~210 ns "build the value
+tree" was mostly inherent (jsonwebtoken's owned Claims struct costs ~130 ns too), but the
+recursive-JSON `Array` variant needlessly boxed each element (`Vec<Option<Box<Json>>>`) —
+a `Vec` already heap-indirects, so it's now `Vec<Option<Json>>`: one fewer alloc per
+element (build ~210 → ~180 ns) and no `Box::new` at call sites.
 
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
 is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo
