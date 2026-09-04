@@ -35,12 +35,13 @@ function preimage(rootOffset: number, body: Uint8Array): Uint8Array {
 
 function mint(alg: string, exp: bigint): Uint8Array {
   const a = new Arena();
-  // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
+  // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
   const custom: Json = { type: "object", value: [
     a.newJsonMember("tenant", { type: "string", value: "acme" }),
     a.newJsonMember("roles", { type: "array", value: [
       { type: "string", value: "admin" }, { type: "string", value: "billing" }] }),
     a.newJsonMember("mfa", { type: "bool", value: true }),
+    a.newJsonMember("fp", { type: "data", value: new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]) }),
   ]};
   const root = a.newClaims("user-42", "https://issuer.dagr.one", "dagr-api",
     NOW, exp, ["read:profile", "write:posts"], custom);
@@ -57,6 +58,7 @@ function mintDirect(alg: string, exp: bigint): Uint8Array {
     { key: "roles", value: { type: "array", value: [
       { type: "string", value: "admin" }, { type: "string", value: "billing" }] } },
     { key: "mfa", value: { type: "bool", value: true } },
+    { key: "fp", value: { type: "data", value: new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]) } },
   ]};
   const root: DirectClaims = {
     subject: "user-42", issuer: "https://issuer.dagr.one", audience: "dagr-api",
@@ -102,6 +104,7 @@ function jsonStr(j: JsonPackedView | null): string {
     case "bool":   return String(j.value);
     case "array":  return "[" + j.value.map(jsonStr).join(",") + "]";
     case "object": return "{" + j.value.map((m) => `${JSON.stringify(m.key)}:${jsonStr(m.value)}`).join(",") + "}";
+    case "data":   return "0x" + Array.from(j.value).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 }
 

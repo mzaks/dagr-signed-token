@@ -48,6 +48,7 @@ def mint(secret: bytes, alg: str, exp: int) -> bytes:
         JsonMember("tenant", Json.string("acme")),
         JsonMember("roles", Json.array([Json.string("admin"), Json.string("billing")])),
         JsonMember("mfa", Json.bool(True)),
+        JsonMember("fp", Json.data(bytes([0xDE, 0xAD, 0xBE, 0xEF]))),
     ])
     root = Claims(
         subject="user-42",
@@ -104,6 +105,8 @@ def json_str(j) -> str:
         return "[" + ",".join(json_str(e) for e in j.value) + "]"
     if j.tag == "object":
         return "{" + ",".join('"%s":%s' % (m.key, json_str(m.value)) for m in j.value) + "}"
+    if j.tag == "data":
+        return "0x" + j.value.hex()
     return "?"
 
 

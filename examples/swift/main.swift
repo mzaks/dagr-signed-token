@@ -28,6 +28,7 @@ func mint(secret: Data, alg: String, exp: UInt64) throws -> Data {
         a.newJsonMember(key: "tenant", value: .string("acme")),
         a.newJsonMember(key: "roles", value: .array([.string("admin"), .string("billing")])),
         a.newJsonMember(key: "mfa", value: .bool(true)),
+        a.newJsonMember(key: "fp", value: .data(Data([0xDE, 0xAD, 0xBE, 0xEF]))),
     ])
     a.root = a.newClaims(
         subject: "user-42",
@@ -50,6 +51,7 @@ func mintDirect(secret: Data, alg: String, exp: UInt64) throws -> Data {
         Token.Direct.JsonMember(key: "tenant", value: .string("acme")),
         Token.Direct.JsonMember(key: "roles", value: .array([.string("admin"), .string("billing")])),
         Token.Direct.JsonMember(key: "mfa", value: .bool(true)),
+        Token.Direct.JsonMember(key: "fp", value: .data(Data([0xDE, 0xAD, 0xBE, 0xEF]))),
     ])
     let claims = Token.Direct.Claims(
         subject: "user-42",
@@ -104,6 +106,7 @@ func jsonStr(_ j: Token.JsonPackedAccessor?) throws -> String {
     case .bool(let b):   return "\(b)"
     case .array(let a):  return try "[" + a.map { try jsonStr($0) }.joined(separator: ",") + "]"
     case .object(let o): return try "{" + o.map { try "\"\($0.key)\":\(jsonStr($0.value))" }.joined(separator: ",") + "}"
+    case .data(let d):   return "0x" + d.map { String(format: "%02x", $0) }.joined()
     case .none: return "-"
     }
 }

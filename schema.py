@@ -46,6 +46,10 @@ TOKEN = DataGraph(
             ("bool",   t.bool),
             ("array",  t.ref("Json").array_with_optionals),
             ("object", t.ref("JsonMember").array),
+            # Binary blob — makes `Json` a SUPERSET of JSON (JSON has no native bytes).
+            # Appended last so string/number/bool/array/object keep tags 0..4 (existing
+            # tokens stay byte-identical); `data` takes tag 5.
+            ("data",   t.data),
         ]),
     ],
     # The JOSE-style envelope: emitted packed + self-sized (spec 14 §5); gets no

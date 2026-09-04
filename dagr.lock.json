@@ -229,6 +229,12 @@
                   },
                   "kind": "array"
                 }
+              },
+              {
+                "name": "data",
+                "type": {
+                  "kind": "data"
+                }
               }
             ]
           }
@@ -251,18 +257,18 @@
     "sinks": {},
     "wire_format_version": 1
   },
-  "library_hash": "sha256:57f99e3b28514198f1ed69d249b11f95f430c2ce39028df29d8130034544364b",
+  "library_hash": "sha256:cc3f040ade31279e58fff92eb51bee186d082164fad096a6c79d479dab1a6abb",
   "outputs": {
     "gen/mojo/dagr_reader.mojo": "sha256:e171aad797fbfe73016190e067ef8d5540364b773a79318d3b9d41ba108ef3fe",
     "gen/mojo/dagr_writer.mojo": "sha256:e33c5f8e0df3685f12b83bd70c1110809fc750613aac0748339a1f39033e7a63",
-    "gen/mojo/token_arena.mojo": "sha256:26b6674969dd07a702943ac7e691978c8ac3e2042a1badc9f539e15a25dac534",
-    "gen/mojo/token_direct.mojo": "sha256:f1ea99b23224e990e0ef33e3231ff3bc98162a0e699f3a040721d570f158da47",
-    "gen/mojo/token_reader.mojo": "sha256:f5b0db986438fe7f4768624439fdcb7f784a31581c3c423210a2e65b2eaba2d9",
-    "gen/mojo/token_restore.mojo": "sha256:f84bc5a439ac1de58e256efbef7153d33086bb80ecc5682aeb0e1aeaf0a4c41c",
-    "gen/mojo/token_serde.mojo": "sha256:d0321da285bc6158ac90917cd62e53c4bb3b21b49523e9c30bbd914e0958125d",
+    "gen/mojo/token_arena.mojo": "sha256:9c8017905fd8f89bfb47b0ad43eda23ebf8389a80fda04c1e23bd88ecd0655ae",
+    "gen/mojo/token_direct.mojo": "sha256:d3c848f2d4d7af99afdc292a7e42963452c7c5507103a0962eacb59ff37475a1",
+    "gen/mojo/token_reader.mojo": "sha256:f089828deeb261c9d9b94987f0351332663f5428a4e7649f5838bd80a7d45c8b",
+    "gen/mojo/token_restore.mojo": "sha256:a8597be28e196a18c1fb2d4dabf8b7e37b7baf0c91a3a24bad12fd131ec65b17",
+    "gen/mojo/token_serde.mojo": "sha256:3b3d5547321ee194cb27a0101df9e009cf0026d07b213985691d9c7cf499b6db",
     "gen/odin/runtime/dagr_reader.odin": "sha256:71ebce1e05f9cd4a17018b657fb2223ac325fc9bec9fc29521d22c78b78e39dd",
     "gen/odin/runtime/dagr_writer.odin": "sha256:48da15ff238d25711754d81c6a172dac3653056d369236a8fb4a334e8e65bd1b",
-    "gen/odin/token.odin": "sha256:adf6caff0ed5edea51c59f7566ee6a4581af9d67cc769219c6e60f2d51637178",
+    "gen/odin/token.odin": "sha256:e1946b291af0c041e8f1a7ae61386e69098385d8f7c2522f4176b3ac676043cf",
     "gen/python/dagr_codegen_shared.py": "sha256:628172e0105d48d21395ccc09e1a0ee269f75bac5bb24d62a9c83d61b910b90d",
     "gen/python/dagr_config.py": "sha256:bd96ecf0826d4ef1947f85a4cbd9ac3a6789a3d8ee2798229c6e80114b8bc3a2",
     "gen/python/dagr_dsl.py": "sha256:9adeb89bafcd96aebcc4bade5a2e723f01ead04b32d82034dadd121202e0f85c",
@@ -274,27 +280,27 @@
     "gen/python/dagr_py/dagr_serialize.py": "sha256:11c75e9b7c4690d51dcd75e56064c5210e4c576679bfc2c6f883024cf671ebdd",
     "gen/python/dagr_py/dagr_typed.py": "sha256:632f0bdaf2dce51d81b7e897fc983ee68f44a917362ac3c238a3ba5b56530d50",
     "gen/python/dagr_py/dagr_writer.py": "sha256:79d0d13988aa3fe84ebddd22fede889c2852b3f8e3574745199f324530cf928f",
-    "gen/python/dagr_schema.py": "sha256:dc781e195c65c38925b56614a684f1c884c7ab02c7ad535c53e934a3792eb463",
-    "gen/python/token.py": "sha256:a83860de446941521690e95f5e689db5ab228be0cfa1fc211e87de101dcad801",
+    "gen/python/dagr_schema.py": "sha256:db781d80c8a6142ea57b5e5ad9ddceb1a751e886e72eca975c695bb5e2322efe",
+    "gen/python/token.py": "sha256:efe327e281304ca39766b9c5835646da8d15f960108c21cacb61c1bbecef3ac9",
     "gen/rust/Cargo.toml": "sha256:507b872841fcf59161d32c015bf1ede73a0f6116c1dc72a6efdd5559c0076e42",
     "gen/rust/src/dagr_runtime.rs": "sha256:9e23cd72556ee53aeaf8a2c9f0871543396a8e8cfe8da4cbb37c9d94cdb7a80f",
     "gen/rust/src/lib.rs": "sha256:b40f6e7aad85822897abd59a6f9d0113e5e41d3a4a785ba579b09eccffc1f42f",
-    "gen/rust/src/token.rs": "sha256:abb2f0da4d7b198547cd0343efd9b63a0c7e380a51aed78d542773ce7e7ecacb",
-    "gen/rust/src/token_lazy.rs": "sha256:041e5f6703abe9e822a00125d3c42e27b358104e5e9d2a6ec0b402e4222bb568",
+    "gen/rust/src/token.rs": "sha256:cf7c71b358df1210d94a0ed366c31e1b6a496e9be766eed9c027ea563b625d68",
+    "gen/rust/src/token_lazy.rs": "sha256:f23938286e59fbe4c11f7e7f0cb7a91ba538eca4cc610d6694f56622daff1ce6",
     "gen/swift/Package.swift": "sha256:0193e79d425bb4d8b7c087923099d91e78fa562d211a5d01c8de2493e5e53a2f",
     "gen/swift/Sources/dagr_signed_token/DagrRuntime.swift": "sha256:fa1b51186936a223cb246ab15511a4cad09f92cc9e4226e0675ecb3c826f114f",
-    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:0b04086e8ee54bf7fd71bf69b4c24e2d4535d3f32cfe8b0528c52b5843039413",
-    "gen/swift/Sources/dagr_signed_token/TokenLazy.swift": "sha256:358653471acada0222d271026efb3af5f8e8c88b569fa0a81e2d005eb57a8707",
-    "gen/typescript/Token.ts": "sha256:f7598e38d4230cd59af9e51c5ba4805f9b323721bd35df7577833bbcaa325133",
-    "gen/typescript/Token_arena.ts": "sha256:5a19259642354317d25a8ac7790ed31fc9eba4af9e5758b6e8044c6fc9cc117a",
-    "gen/typescript/Token_direct.ts": "sha256:2d8762af2720e5983704272c56db6985664424309a665b1ba6921305d0c071cd",
-    "gen/typescript/Token_serde.ts": "sha256:924272dbc66662c122ebabc06572edd9888d307b050bc0996c05794e56c0f59d",
+    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:95bc017c0800f65e6ddf3e7d6b2892f7d6f35e9a1e0314ce4f1f3c8caf536525",
+    "gen/swift/Sources/dagr_signed_token/TokenLazy.swift": "sha256:b6c119a603188bfa0b120fed0663dcf9fbef4832cbc45f86f5f6450f8b3487fc",
+    "gen/typescript/Token.ts": "sha256:304413ac7d934fa5280fe010ac0f9d9be743fabc157263749cae1677fcf779aa",
+    "gen/typescript/Token_arena.ts": "sha256:7b34d3f78fb9cf48c46baf98679cfaf2c8c7fd5995792734d132b1c81174872b",
+    "gen/typescript/Token_direct.ts": "sha256:45275e4061221e1c77b7ab8f4135e96a12592dca84ebab4286df347888093dd3",
+    "gen/typescript/Token_serde.ts": "sha256:46b6012275ab9aab81b81be019d71ebac63859489175b7129e8b24a0f1eccc10",
     "gen/typescript/dagr_reader.ts": "sha256:24321476adefbb920e3ae8789eeffcae5c43b306cafb4e524ff95cf37bcb4431",
     "gen/typescript/dagr_writer.ts": "sha256:62412424704d1ced9b195fa22f1643f5bd1c7bba0a6f9b203c44905a67c3f328"
   },
   "provenance": {
     "command": "dagr build",
-    "generated_at": "2026-09-03T15:13:37.031894+00:00",
+    "generated_at": "2026-09-04T06:24:23.541164+00:00",
     "host": "Mac.fritz.box",
     "tool_version": "dagr 0.1.0"
   },

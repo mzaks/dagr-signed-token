@@ -145,14 +145,15 @@ def _build_arena(exp: UInt64) raises -> TokenArena:
     var c = a.new_claims(String("user-42"), String("https://issuer.dagr.one"),
                          String("dagr-api"), NOW, exp)
     c.set_scopes([String("read:profile"), String("write:posts")])
-    # custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
+    # custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
     var roles = a.new_json_array([
         Optional(a.new_json_string(String("admin"))),
         Optional(a.new_json_string(String("billing")))])
     var m_tenant = a.new_json_member(String("tenant")); m_tenant.set_value(a.new_json_string(String("acme")))
     var m_roles = a.new_json_member(String("roles"));   m_roles.set_value(roles)
     var m_mfa = a.new_json_member(String("mfa"));       m_mfa.set_value(a.new_json_bool(True))
-    c.set_custom(a.new_json_object([m_tenant, m_roles, m_mfa]))
+    var m_fp = a.new_json_member(String("fp"));         m_fp.set_value(a.new_json_data([UInt8(0xDE), UInt8(0xAD), UInt8(0xBE), UInt8(0xEF)]))
+    c.set_custom(a.new_json_object([m_tenant, m_roles, m_mfa, m_fp]))
     a.set_root(c)
     return a^
 
@@ -200,6 +201,11 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
         var m = String(e)
         return m if m.find("|") >= 0 else String("GATE (verify-before-parse)|Malformed")
 
+# Two lowercase hex digits for a byte (Json.data renders as 0x<hex>, JSON's superset).
+def _hex2(b: UInt8) -> String:
+    comptime H = String("0123456789abcdef")
+    return String(H[byte=Int(b >> 4)]) + String(H[byte=Int(b & 15)])
+
 # Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
 # Writes straight into a Writer: one growing buffer, no per-node String allocation.
 def _json_write_lazy[o: ImmOrigin](j: JsonPackedView[o], mut w: Some[Writer]) raises:
@@ -209,6 +215,11 @@ def _json_write_lazy[o: ImmOrigin](j: JsonPackedView[o], mut w: Some[Writer]) ra
         w.write(j.number())
     elif j.is_bool():
         w.write("true") if j.bool() else w.write("false")
+    elif j.is_data():
+        w.write("0x")
+        var d = j.data()
+        for i in range(len(d)):
+            w.write(_hex2(d[i]))
     elif j.is_array():
         w.write("[")
         var arr = j.array()
@@ -261,6 +272,7 @@ def _build_direct(exp: UInt64) raises -> DirectClaims:
     members.append(DirectJsonMember(String("tenant"), Optional(ArcPointer(DirectJson.string(String("acme"))))))
     members.append(DirectJsonMember(String("roles"), Optional(ArcPointer(roles^))))
     members.append(DirectJsonMember(String("mfa"), Optional(ArcPointer(DirectJson.bool(True)))))
+    members.append(DirectJsonMember(String("fp"), Optional(ArcPointer(DirectJson.data([UInt8(0xDE), UInt8(0xAD), UInt8(0xBE), UInt8(0xEF)])))))
     var custom = DirectJson.object(members^)
     return DirectClaims(
         Optional[String](String("user-42")),

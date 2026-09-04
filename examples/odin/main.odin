@@ -52,7 +52,7 @@ header_fn :: proc(ctx: rawptr, root_offset: int, body: []u8) -> tok.Jws_Value {
 // Mint via the reusable direct-graph-builder Writer (spec 31 §4.3): no arena — the claims
 // are a value tree handed straight to the writer, which reuses one builder across mints.
 mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []u8 {
-	// custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }.
+	// custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }.
 	// NOTE: hoist every nested slice literal into a named var — an Odin compound-literal
 	// `[]T{...}` used inline in a larger expression is a temporary whose backing array
 	// does not outlive the statement, so a nested one would dangle before the writer walks
@@ -61,10 +61,12 @@ mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []
 		tok.Json_Value{tag = .string, string = "admin"},
 		tok.Json_Value{tag = .string, string = "billing"},
 	}
+	fp := []u8{0xDE, 0xAD, 0xBE, 0xEF}
 	members := []tok.JsonMember_Value{
 		{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},
 		{key = "roles", value = tok.Json_Value{tag = .array, array = roles}},
 		{key = "mfa", value = tok.Json_Value{tag = .bool, bool = true}},
+		{key = "fp", value = tok.Json_Value{tag = .data, data = fp}},
 	}
 	custom := tok.Json_Value{tag = .object, object = members}
 	scopes := []string{"read:profile", "write:posts"}
@@ -152,6 +154,9 @@ json_str_lazy :: proc(sb: ^strings.Builder, j: tok.Json_PackedView) {
 			if v, has := tok.json_member_value(m).?; has { json_str_lazy(sb, v) } else { strings.write_string(sb, "null") }
 		}
 		strings.write_byte(sb, '}')
+	case .data:
+		strings.write_string(sb, "0x")
+		for b in tok.json_packed_data(j) { fmt.sbprintf(sb, "%02x", b) }
 	}
 }
 

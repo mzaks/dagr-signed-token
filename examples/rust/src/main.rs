@@ -28,7 +28,7 @@ fn preimage(root_offset: usize, body: &[u8]) -> Vec<u8> {
 
 fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     let a = TokenArena::<0>::new();
-    // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
+    // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
     let custom = Json::Object(vec![
         a.new_json_member("tenant", Some(Json::String("acme".into()))),
         a.new_json_member("roles", Some(Json::Array(vec![
@@ -36,6 +36,7 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
             Some(Json::String("billing".into())),
         ]))),
         a.new_json_member("mfa", Some(Json::Bool(true))),
+        a.new_json_member("fp", Some(Json::Data(vec![0xDE, 0xAD, 0xBE, 0xEF]))),
     ]);
     a.set_root(Some(a.new_claims(
         Some("user-42"),
@@ -61,7 +62,7 @@ fn mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
 #[cfg_attr(not(test), allow(dead_code))]
 fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     use dagr_signed_token::token::{direct, Token};
-    // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true }
+    // custom = { "tenant": "acme", "roles": ["admin", "billing"], "mfa": true, "fp": 0xdeadbeef }
     let custom = direct::Json::Object(vec![
         direct::JsonMember { key: "tenant".into(), value: Some(direct::Json::String("acme".into())) },
         direct::JsonMember { key: "roles".into(), value: Some(direct::Json::Array(vec![
@@ -69,6 +70,7 @@ fn mint_direct(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
             Some(Box::new(direct::Json::String("billing".into()))),
         ])) },
         direct::JsonMember { key: "mfa".into(), value: Some(direct::Json::Bool(true)) },
+        direct::JsonMember { key: "fp".into(), value: Some(direct::Json::Data(vec![0xDE, 0xAD, 0xBE, 0xEF])) },
     ]);
     let claims = direct::Claims {
         subject: Some("user-42".into()),
@@ -96,7 +98,7 @@ mod tests {
         let a = mint(SECRET, "HS256", EXP);
         let d = mint_direct(SECRET, "HS256", EXP);
         assert_eq!(a, d, "direct builder diverged from arena ({} vs {} bytes)", a.len(), d.len());
-        assert_eq!(d.len(), 196, "expected the 196-byte reference token");
+        assert_eq!(d.len(), 207, "expected the 207-byte reference token");
     }
 }
 
@@ -142,6 +144,7 @@ fn json_str_lazy(j: &JsonPackedArrayAccessor) -> String {
             o.iter().map(|m| m.map(|m| format!("{:?}:{}", m.key().unwrap_or(""),
                 m.value().map(|v| json_str_lazy(&v)).unwrap_or_else(|| "null".into()))).unwrap_or_default())
                 .collect::<Vec<_>>().join(",")),
+        JsonPackedArrayAccessor::Data(d) => format!("0x{}", d.iter().map(|b| format!("{b:02x}")).collect::<String>()),
         JsonPackedArrayAccessor::Unknown(_) => "?".into(),
     }
 }

@@ -22,7 +22,7 @@ Everything is **dependency-free**: the codec is generated Dagr code, and the
 crypto is each platform's standard tool — Rust hand-rolls SHA-256/HMAC (validated
 against NIST + RFC 4231 vectors), Swift uses CryptoKit, TypeScript uses Node's
 built-in `node:crypto`. Because HMAC-SHA256 is a standard and the Dagr body is
-byte-identical across languages, the signatures — and the whole 196-byte token —
+byte-identical across languages, the signatures — and the whole 207-byte token —
 match to the byte.
 
 ## Layout
@@ -82,9 +82,9 @@ odin run examples/odin -out:examples/odin/dst-odin
 Each prints the mint size and five verification outcomes:
 
 ```
-Minted token: 196 bytes
+Minted token: 207 bytes
 Verification:
-  valid token          ACCEPT  sub="user-42" custom={"tenant":"acme","roles":["admin","billing"],"mfa":true}
+  valid token          ACCEPT  sub="user-42" custom={"tenant":"acme","roles":["admin","billing"],"mfa":true,"fp":0xdeadbeef}
   tampered body        REJECT  [GATE (verify-before-parse)] BadSignature
   wrong key            REJECT  [GATE (verify-before-parse)] BadSignature
   alg:none token       REJECT  [GATE (verify-before-parse)] BadAlg
@@ -99,7 +99,7 @@ Verification:
 
 ```
 == [byte-identity] all minted tokens must be identical ==
-  IDENTICAL (196 bytes) — rust == swift == ts == python == mojo == odin
+  IDENTICAL (207 bytes) — rust == swift == ts == python == mojo == odin
 == [cross-verify] every verifier reads every language's token ==
   rust   verifies rust   : OK
   swift  verifies rust   : OK
