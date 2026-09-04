@@ -200,34 +200,42 @@ def verify(buf: List[UInt8], secret: String, now: UInt64) raises -> String:
     return String("")
 
 # Lazy render of the packed-JSON `custom` claim — walks the buffer, no owned graph.
-def _json_str_lazy[o: ImmOrigin](j: JsonPackedView[o]) raises -> String:
-    var t = j.tag()
-    if t == 0:
-        return String('"') + j.string() + String('"')
-    if t == 1:
-        return String(j.number())
-    if t == 2:
-        return String("true") if j.bool() else String("false")
-    if t == 3:
-        var s = String("[")
+# Writes straight into a Writer: one growing buffer, no per-node String allocation.
+def _json_write_lazy[o: ImmOrigin](j: JsonPackedView[o], mut w: Some[Writer]) raises:
+    if j.is_string():
+        w.write('"', j.string(), '"')
+    elif j.is_number():
+        w.write(j.number())
+    elif j.is_bool():
+        w.write("true") if j.bool() else w.write("false")
+    elif j.is_array():
+        w.write("[")
         var arr = j.array()
         for i in range(len(arr)):
-            if i > 0: s += String(",")
+            if i > 0: w.write(",")
             var e = arr.get(i)
-            if e: s += _json_str_lazy(e.value())
-            else: s += String("null")
-        return s + String("]")
-    if t == 4:
-        var s = String("{")
+            if e: _json_write_lazy(e.value(), w)
+            else: w.write("null")
+        w.write("]")
+    elif j.is_object():
+        w.write("{")
         var obj = j.object()
         for i in range(len(obj)):
-            if i > 0: s += String(",")
+            if i > 0: w.write(",")
             var m = obj.get(i)
             var v = m.value()
-            s += String('"') + m.key() + String('":')
-            s += _json_str_lazy(v.value()) if v else String("null")
-        return s + String("}")
-    return String("?")
+            w.write('"', m.key(), '":')
+            if v: _json_write_lazy(v.value(), w)
+            else: w.write("null")
+        w.write("}")
+    else:
+        w.write("?")
+
+# Thin materializing wrapper for callers that want an owned String.
+def _json_str_lazy[o: ImmOrigin](j: JsonPackedView[o]) raises -> String:
+    var s = String()
+    _json_write_lazy(j, s)
+    return s^
 
 def _report(label: String, buf: List[UInt8]) raises:
     var r = verify(buf, SECRET, NOW)
