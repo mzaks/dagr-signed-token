@@ -132,7 +132,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | rust | dagr | 1020 | **196** | **207** |
 | rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
 | swift | dagr | 5033 | 1859 | 207 |
-| ts | dagr | 4990 | 3135 | 207 |
+| ts | dagr | 4990 | 2190 | 207 |
 | ts | jwt | 1607 | 2092 | 395 |
 | python | dagr | 59682 | 48549 | 207 |
 | python | jwt | 5189 | 4881 | 395 |
@@ -235,6 +235,11 @@ list (hundreds of micro-allocations per token) and concatenated them at the end,
 encoding routed through `BigInt`. Rewritten as a **single backward-growing `Uint8Array`**
 (direct byte writes, a `number` LEB fast path, cycle late-binding recorded by cursor offset),
 it is byte-identical (6007-test suite green) and roughly halves mint: **~10.7 µs → ~5.0 µs**.
+TS *verify* was then profiled too: the frozen-packed accessor decoded **every** field in its
+constructor — including `scopes` and the whole recursive `custom` JSON tree — even though
+verify reads only `expiresAt` + `audience`. Deferring composite fields (arrays / unions /
+node-refs) to on-access getters (scalars stay eager) cut verify **~3.1 µs → ~2.2 µs**, now
+*below* TS's own `jsonwebtoken` verify.
 
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
