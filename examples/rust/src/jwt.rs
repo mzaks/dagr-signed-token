@@ -1,85 +1,65 @@
-//! A minimal classic **JWS/JWT** (HS256) for the benchmark's apples-to-apples
-//! comparison — same claims, same HMAC-SHA256, same runtime as the Dagr token, so
-//! the delta isolates the *format* (compact base64url JSON `header.payload.sig`
-//! vs Dagr's binary graph). Hand-rolled + zero-dependency, matching the demo.
+//! Classic JWT baseline via the **`jsonwebtoken`** crate — the standard Rust JWT
+//! library, so this is a *proper* real-world comparison: serde-derived claims, its
+//! own header + base64url + signature handling, and full validation on decode
+//! (signature + `exp` + `aud`). Bench-only (compiled behind `--features bench`).
 //!
-//! NOT a hardened JWT library. `verify` recomputes the MAC then does a light,
-//! payload-shape-specific scan for `exp`/`aud` (a real lib would `serde_json`-parse
-//! the whole payload — strictly MORE work, so this is conservative toward JWT).
+//! NOTE: `jsonwebtoken` validates `exp` against the real wall clock (there's no
+//! injectable "now"), so the bench mints the valid token with a `now + 1h` exp while
+//! the Dagr token keeps its fixed demo timestamps. jsonwebtoken's crypto backend is
+//! its own (ring), vs Dagr's RustCrypto `hmac`+`sha2` — both production-grade native
+//! implementations; the format + serde overhead is what the delta actually measures.
 
-use crate::sha256::{ct_eq, hmac_sha256};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+#[derive(Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    iss: String,
+    aud: String,
+    iat: u64,
+    exp: u64,
+    scopes: Vec<String>,
+    tenant: String,
+    roles: Vec<String>,
+    mfa: bool,
+    fp: String,
+}
 
-fn b64url_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
-        out.push(B64[(n >> 18 & 63) as usize] as char);
-        out.push(B64[(n >> 12 & 63) as usize] as char);
-        if chunk.len() > 1 { out.push(B64[(n >> 6 & 63) as usize] as char); }
-        if chunk.len() > 2 { out.push(B64[(n & 63) as usize] as char); }
+fn claims(exp: u64) -> Claims {
+    Claims {
+        sub: "user-42".into(),
+        iss: "https://issuer.dagr.one".into(),
+        aud: "dagr-api".into(),
+        iat: 1_760_000_000,
+        exp,
+        scopes: vec!["read:profile".into(), "write:posts".into()],
+        tenant: "acme".into(),
+        roles: vec!["admin".into(), "billing".into()],
+        mfa: true,
+        fp: "0xdeadbeef".into(),
     }
-    out // no '=' padding (base64url, RFC 7515 §2)
 }
 
-fn b64url_decode(s: &[u8]) -> Vec<u8> {
-    fn val(c: u8) -> u32 {
-        match c {
-            b'A'..=b'Z' => (c - b'A') as u32,
-            b'a'..=b'z' => (c - b'a' + 26) as u32,
-            b'0'..=b'9' => (c - b'0' + 52) as u32,
-            b'-' => 62, b'_' => 63,
-            _ => 0,
-        }
-    }
-    let mut out = Vec::with_capacity(s.len() / 4 * 3);
-    for chunk in s.chunks(4) {
-        let mut n = 0u32;
-        for (i, &c) in chunk.iter().enumerate() { n |= val(c) << (18 - 6 * i); }
-        out.push((n >> 16) as u8);
-        if chunk.len() > 2 { out.push((n >> 8) as u8); }
-        if chunk.len() > 3 { out.push(n as u8); }
-    }
-    out
+/// Current-timestamp helper (jsonwebtoken validates `exp` against wall-clock).
+pub fn now() -> u64 {
+    jsonwebtoken::get_current_timestamp()
 }
 
-/// Mint the same claim set the Dagr token carries, as a compact HS256 JWT string.
-pub fn jwt_mint(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
-    let header = format!(r#"{{"alg":"{alg}","typ":"JWT","kid":"hmac-key-2026"}}"#);
-    let payload = format!(
-        r#"{{"sub":"user-42","iss":"https://issuer.dagr.one","aud":"dagr-api","iat":1760000000,"exp":{exp},"scopes":["read:profile","write:posts"],"tenant":"acme","roles":["admin","billing"],"mfa":true,"fp":"0xdeadbeef"}}"#
-    );
-    let signing_input = format!("{}.{}", b64url_encode(header.as_bytes()), b64url_encode(payload.as_bytes()));
-    let sig = hmac_sha256(secret, signing_input.as_bytes());
-    format!("{signing_input}.{}", b64url_encode(&sig)).into_bytes()
+pub fn jwt_mint(secret: &[u8], exp: u64) -> Vec<u8> {
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = Some("hmac-key-2026".into());
+    encode(&header, &claims(exp), &EncodingKey::from_secret(secret))
+        .expect("jwt encode")
+        .into_bytes()
 }
 
-/// Verify-before-use: recompute the MAC over `header.payload`, constant-time compare,
-/// then decode the payload and check `alg`/`exp`/`aud`. Returns Ok on accept.
-pub fn jwt_verify(token: &[u8], secret: &[u8], now: u64) -> Result<(), &'static str> {
-    let dot2 = token.iter().rposition(|&b| b == b'.').ok_or("malformed")?;
-    let signing_input = &token[..dot2];
-    let sig = b64url_decode(&token[dot2 + 1..]);
-    let expected = hmac_sha256(secret, signing_input);
-    if !ct_eq(&sig, &expected) { return Err("BadSignature"); }
-    // Now decode header + payload (the work Dagr's binary body avoids).
-    let dot1 = signing_input.iter().position(|&b| b == b'.').ok_or("malformed")?;
-    let header = b64url_decode(&signing_input[..dot1]);
-    if !find_str(&header, b"\"alg\":\"").is_some_and(|v| v == b"HS256") { return Err("BadAlg"); }
-    let payload = b64url_decode(&signing_input[dot1 + 1..]);
-    let exp: u64 = find_str(&payload, b"\"exp\":")
-        .and_then(|d| std::str::from_utf8(d).ok()).and_then(|s| s.parse().ok()).ok_or("malformed")?;
-    if now >= exp { return Err("Expired"); }
-    if find_str(&payload, b"\"aud\":\"") != Some(b"dagr-api") { return Err("WrongAudience"); }
-    Ok(())
-}
-
-/// Read the token value following `key` — a quoted string (stops at `"`) or a bare
-/// number (stops at `,`/`}`). Enough for the fixed benchmark payload.
-fn find_str<'a>(buf: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
-    let start = buf.windows(key.len()).position(|w| w == key)? + key.len();
-    let end = buf[start..].iter().position(|&c| c == b'"' || c == b',' || c == b'}')?;
-    Some(&buf[start..start + end])
+pub fn jwt_verify(token: &[u8], secret: &[u8]) -> Result<(), jsonwebtoken::errors::Error> {
+    let mut v = Validation::new(Algorithm::HS256); // validates signature + exp by default
+    v.set_audience(&["dagr-api"]);
+    let s = match std::str::from_utf8(token) {
+        Ok(s) => s,
+        Err(_) => return Err(jsonwebtoken::errors::ErrorKind::InvalidToken.into()),
+    };
+    decode::<Claims>(s, &DecodingKey::from_secret(secret), &v).map(|_| ())
 }

@@ -22,9 +22,9 @@ echo "== [gen] dagr build =="
 dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json" >/dev/null
 
 echo "== [build] optimized binaries =="
-# `real-crypto`: swap HMAC-SHA256 to RustCrypto (hmac+sha2) so the bench reflects a
-# realistic, hardware-accelerated crypto backend (same as a real JWT lib) — same bytes.
-cargo build --release --quiet --features real-crypto --manifest-path examples/rust/Cargo.toml
+# `bench` feature: RustCrypto HMAC for Dagr (real-crypto) + the `jsonwebtoken` crate as
+# the JWT baseline (proper real-world lib). Off by default → the demo stays zero-dep.
+cargo build --release --quiet --features bench --manifest-path examples/rust/Cargo.toml
 RUST=(./examples/rust/target/release/dst)
 swiftc -O gen/swift/Sources/dagr_signed_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dst-swift
 SWIFT=(./examples/swift/dst-swift)
