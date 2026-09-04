@@ -132,7 +132,7 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 | rust | dagr | 1020 | **196** | **207** |
 | rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
 | swift | dagr | 5033 | 1859 | 207 |
-| ts | dagr | 10661 | 3135 | 207 |
+| ts | dagr | 4990 | 3135 | 207 |
 | ts | jwt | 1607 | 2092 | 395 |
 | python | dagr | 59682 | 48549 | 207 |
 | python | jwt | 5189 | 4881 | 395 |
@@ -228,6 +228,14 @@ header accessor everywhere), and the win tracks how much each language paid for 
 **Swift ~unchanged** (`≈1860 ns`; CryptoKit-bound, and its getters still allocate — kept for
 consistency). Where the header was a real fraction (Mojo, Rust) the win is large; where
 crypto dominates (Swift, TS) it is small — exactly as the profile predicted.
+
+**TS mint** was separately profiled (serialize was ~88 % of it, ~9.2 µs) and the hand-written
+`Builder` rebuilt: it had stored every field as a tiny `number[]` chunk in a `number[][]`
+list (hundreds of micro-allocations per token) and concatenated them at the end, with `LEB`
+encoding routed through `BigInt`. Rewritten as a **single backward-growing `Uint8Array`**
+(direct byte writes, a `number` LEB fast path, cycle late-binding recorded by cursor offset),
+it is byte-identical (6007-test suite green) and roughly halves mint: **~10.7 µs → ~5.0 µs**.
+
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
