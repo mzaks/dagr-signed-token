@@ -116,21 +116,24 @@ Verification:
 ```
 
 Each language mints + verifies in-process (warm-up + 50k reps, correctness-gated).
+The Dagr numbers exercise the **fast path**: arena-free **direct build** (spec 31 —
+a value tree straight to bytes, gated byte-identical to the arena) + **zero-alloc
+lazy verify** (verify-before-parse, then read fields off the buffer, no restore).
 Rust, TypeScript, and Python also bench an **equivalent classic HS256 JWT** — same
 claims, same HMAC-SHA256 — so the delta isolates the *format*. Representative run
 (Apple Silicon; ns/op — treat as ratios, not absolutes):
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 2564 | **1066** | **207** |
-| rust | jwt | 2071 | 2071 | 395 |
-| swift | dagr | 9546 | 1842 | 207 |
-| ts | dagr | 10815 | 3146 | 207 |
-| ts | jwt | 1669 | 2101 | 395 |
-| python | dagr | 59335 | 47737 | 207 |
-| python | jwt | 5269 | 4990 | 395 |
-| mojo | dagr | 11328 | 8107 | 207 |
-| odin | dagr | 2242 | **287** | 207 |
+| rust | dagr | 2287 | **1073** | **207** |
+| rust | jwt | 2020 | 2094 | 395 |
+| swift | dagr | 5088 | 1855 | 207 |
+| ts | dagr | 9822 | 3163 | 207 |
+| ts | jwt | 1608 | 2030 | 395 |
+| python | dagr | 58902 | 47256 | 207 |
+| python | jwt | 4977 | 4739 | 395 |
+| mojo | dagr | 10146 | 7692 | 207 |
+| odin | dagr | 2171 | **283** | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
@@ -143,7 +146,10 @@ JWT; Odin verifies in **287 ns**), but in Node/CPython the heavily-optimized *na
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph,
 JWT is base64url JSON). Crypto also differs per language (Rust/Mojo hand-roll scalar
 SHA-256; Swift = CryptoKit, TS = `node:crypto`, Python = `hashlib`, Odin = `core:crypto`),
-so `verify` time reflects the platform's crypto, not only the format read.
+so `verify` time reflects the platform's crypto, not only the format read. **Python**
+is the outlier: its target is the *reflective* Fork-A codec (no direct builder, eager
+restore instead of lazy) — a notebook/oracle layer, not an optimized codec — so its
+Dagr numbers are ~10× its native JSON, unlike the compiled targets.
 
 ## Key properties
 

@@ -181,17 +181,19 @@ fn time_ns(iters: u32, mut f: impl FnMut()) -> u128 {
 // claims + HMAC-SHA256. Emits machine-parseable `BENCH …` lines for run_bench.sh.
 fn bench() {
     let n = 50_000;
-    let tok = mint(SECRET, "HS256", EXP);
+    // Bench the FAST PATH: arena-free direct build (spec 31) + zero-alloc lazy verify.
+    let tok = mint_direct(SECRET, "HS256", EXP);
     let jtok0 = jwt::jwt_mint(SECRET, "HS256", EXP);
     // Correctness gate: both must accept the valid token and reject a tampered/expired one,
     // else the timings below are meaningless.
     assert!(verify(&tok, SECRET, NOW).is_ok() && jwt::jwt_verify(&jtok0, SECRET, NOW).is_ok());
-    assert!(verify(&mint(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
+    assert_eq!(tok, mint(SECRET, "HS256", EXP), "direct build must be byte-identical to arena");
+    assert!(verify(&mint_direct(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
     assert!(jwt::jwt_verify(&jwt::jwt_mint(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
     let mut bad = jtok0.clone(); let mid = bad.len() / 2; bad[mid] ^= 1;  // flip a payload char
     assert!(jwt::jwt_verify(&bad, SECRET, NOW).is_err());
 
-    let dm = time_ns(n, || { std::hint::black_box(mint(SECRET, "HS256", EXP)); });
+    let dm = time_ns(n, || { std::hint::black_box(mint_direct(SECRET, "HS256", EXP)); });
     let dv = time_ns(n, || { std::hint::black_box(verify(std::hint::black_box(&tok), SECRET, NOW).is_ok()); });
     println!("BENCH rust dagr mint={dm} verify={dv} size={}", tok.len());
 

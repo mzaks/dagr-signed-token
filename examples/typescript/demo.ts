@@ -155,12 +155,15 @@ function timeNs(iters: number, f: () => void): bigint {
 
 function bench(): void {
   const n = 50_000;
-  const tok = mint("HS256", EXP);
+  // Bench the FAST PATH: arena-free direct build (spec 31) + zero-alloc lazy verify.
+  const tok = mintDirect("HS256", EXP);
   const jtok = jwtMint("HS256", EXP);
   // Correctness gate.
   if (!verify(tok, NOW, SECRET).ok || !jwtVerify(jtok, NOW, SECRET)) throw new Error("verify must accept");
-  if (verify(mint("HS256", NOW - 1n), NOW, SECRET).ok || jwtVerify(jwtMint("HS256", NOW - 1n), NOW, SECRET)) throw new Error("expired must reject");
-  const dm = timeNs(n, () => { mint("HS256", EXP); });
+  const arena = mint("HS256", EXP);
+  if (tok.length !== arena.length || !tok.every((x, i) => x === arena[i])) throw new Error("direct != arena");
+  if (verify(mintDirect("HS256", NOW - 1n), NOW, SECRET).ok || jwtVerify(jwtMint("HS256", NOW - 1n), NOW, SECRET)) throw new Error("expired must reject");
+  const dm = timeNs(n, () => { mintDirect("HS256", EXP); });
   const dv = timeNs(n, () => { verify(tok, NOW, SECRET); });
   console.log(`BENCH ts dagr mint=${dm} verify=${dv} size=${tok.length}`);
   const jm = timeNs(n, () => { jwtMint("HS256", EXP); });

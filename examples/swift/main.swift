@@ -135,12 +135,14 @@ func timeNs(_ iters: Int, _ f: () -> Void) -> UInt64 {
 // Mint + verify throughput (no JWT baseline in Swift — see Rust/TS/Python for that).
 func bench() throws {
     let n = 50_000
-    let tok = try mint(secret: SECRET, alg: "HS256", exp: EXP)
+    // Bench the FAST PATH: arena-free direct build (spec 31) + zero-alloc lazy verify.
+    let tok = try mintDirect(secret: SECRET, alg: "HS256", exp: EXP)
     guard case .success = verify(tok, secret: SECRET, now: NOW) else { fatalError("verify must accept") }
-    guard case .failure = verify(try mint(secret: SECRET, alg: "HS256", exp: NOW - 1), secret: SECRET, now: NOW)
+    guard try tok == mint(secret: SECRET, alg: "HS256", exp: EXP) else { fatalError("direct != arena") }
+    guard case .failure = verify(try mintDirect(secret: SECRET, alg: "HS256", exp: NOW - 1), secret: SECRET, now: NOW)
     else { fatalError("expired must reject") }
     var sink: UInt64 = 0                                  // keep results live (defeat DCE)
-    let dm = timeNs(n) { sink &+= UInt64((try? mint(secret: SECRET, alg: "HS256", exp: EXP))?.first ?? 0) }
+    let dm = timeNs(n) { sink &+= UInt64((try? mintDirect(secret: SECRET, alg: "HS256", exp: EXP))?.first ?? 0) }
     let dv = timeNs(n) { if case .success = verify(tok, secret: SECRET, now: NOW) { sink &+= 1 } }
     print("BENCH swift dagr mint=\(dm) verify=\(dv) size=\(tok.count)")
     if sink == 12_345_678 { print("") }

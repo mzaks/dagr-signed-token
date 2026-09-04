@@ -295,17 +295,20 @@ def mint_direct(alg: String, exp: UInt64) raises -> List[UInt8]:
 # Mint + verify throughput (no JWT baseline in Mojo — see Rust/TS/Python for that).
 def bench() raises:
     var n = 50000
-    var tok = mint(String("HS256"), EXP)
+    # Bench the FAST PATH: arena-free direct build (spec 31) + zero-alloc lazy verify.
+    var tok = mint_direct(String("HS256"), EXP)
     if verify(tok, SECRET, NOW) != String(""):
         raise Error("dagr verify must accept")
-    if verify(mint(String("HS256"), NOW - 1), SECRET, NOW) == String(""):
+    if tok != mint(String("HS256"), EXP):
+        raise Error("direct != arena")
+    if verify(mint_direct(String("HS256"), NOW - 1), SECRET, NOW) == String(""):
         raise Error("expired must reject")
     var sink: UInt64 = 0                              # keep results live (defeat DCE)
     for _ in range(n // 10):
-        var m = mint(String("HS256"), EXP); sink += UInt64(m[0])
+        var m = mint_direct(String("HS256"), EXP); sink += UInt64(m[0])
     var t0 = perf_counter_ns()
     for _ in range(n):
-        var m = mint(String("HS256"), EXP); sink += UInt64(m[0])
+        var m = mint_direct(String("HS256"), EXP); sink += UInt64(m[0])
     var dm = Int(perf_counter_ns() - t0) // n
     for _ in range(n // 10):
         sink += UInt64(verify(tok, SECRET, NOW).byte_length())
