@@ -131,12 +131,12 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 |---|---|--:|--:|--:|
 | rust | dagr | 900 | **228** | **207** |
 | rust | jwt (`jsonwebtoken`) | 858 | 1437 | 395 |
-| swift | dagr | 5312 | 1957 | 207 |
-| ts | dagr | 10135 | 3276 | 207 |
-| ts | jwt | 1713 | 2140 | 395 |
+| swift | dagr | 5110 | 1909 | 207 |
+| ts | dagr | 10200 | 3200 | 207 |
+| ts | jwt | 1640 | 2070 | 395 |
 | python | dagr | 60455 | 48847 | 207 |
 | python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 12357 | 7764 | 207 |
+| mojo | dagr | 8419 | 7923 | 207 |
 | odin | dagr | 2243 | 303 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
@@ -163,6 +163,13 @@ tree" was mostly inherent (jsonwebtoken's owned Claims struct costs ~130 ns too)
 recursive-JSON `Array` variant needlessly boxed each element (`Vec<Option<Box<Json>>>`) —
 a `Vec` already heap-indirects, so it's now `Vec<Option<Json>>`: one fewer alloc per
 element (build ~210 → ~180 ns) and no `Box::new` at call sites.
+
+The same one-builder serialize was applied to the **Swift, TS, and Mojo** direct builders.
+The standout was **Mojo**, which serialized the whole tree *twice* (headerless to sign it,
+then again with the header, plus a value-tree copy) — a single-pass `gate` closure cut its
+mint **~12360 → ~8420 ns**. (Mojo can't drop its `ArcPointer` the way Rust dropped the Box:
+its trait-conformance check rejects a `List` of the still-being-defined type, where Rust's
+`Vec` resolves the recursion.)
 
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
 is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo
