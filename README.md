@@ -129,15 +129,15 @@ feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op �
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 900 | **228** | **207** |
-| rust | jwt (`jsonwebtoken`) | 858 | 1437 | 395 |
-| swift | dagr | 5110 | 1909 | 207 |
-| ts | dagr | 10200 | 3200 | 207 |
-| ts | jwt | 1640 | 2070 | 395 |
-| python | dagr | 60455 | 48847 | 207 |
-| python | jwt | 5320 | 4971 | 395 |
-| mojo | dagr | 1420 | 360 | 207 |
-| odin | dagr | 2239 | 278 | 207 |
+| rust | dagr | 1020 | **196** | **207** |
+| rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
+| swift | dagr | 5033 | 1859 | 207 |
+| ts | dagr | 10661 | 3135 | 207 |
+| ts | jwt | 1607 | 2092 | 395 |
+| python | dagr | 59682 | 48549 | 207 |
+| python | jwt | 5189 | 4881 | 395 |
+| mojo | dagr | 1488 | 343 | 207 |
+| odin | dagr | 2229 | 281 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
 in every language (schema-driven: field names never hit the wire, no base64 33 %
@@ -216,11 +216,18 @@ which built an owned `Jws{algorithm, keyId, signature}` — three heap allocatio
 gate now receives the zero-alloc header *accessor* (buffer + field positions) and reads
 `algorithm`/`signature` as a `StringSlice`/`Span` straight from the buffer (`_view` getters),
 so nothing is materialized and `keyId` is skipped. That erased the header half — **verify
-`645 → 360 ns`** — and verify is now genuinely HMAC-bound (~91 %), a hair behind Odin's
-`core:crypto` (278 ns) and closing on Rust's `ring` (239 ns). Closing the last bit would mean
-`ring`'s multi-buffer hand-scheduled asm — i.e. rebuilding a crypto library — so we stop here.
-(The same lazy-header-gate change applies to Odin, whose getters already borrowed from the
-buffer, so its win was small: `297 → 278 ns`.)
+`645 → 360 ns`** — and verify is now genuinely HMAC-bound (~91 %). Closing the last bit
+would mean `ring`'s multi-buffer hand-scheduled asm — i.e. rebuilding a crypto library —
+so we stop there.
+
+The lazy header gate is a **cross-language** change (the gate now receives a zero-alloc
+header accessor everywhere), and the win tracks how much each language paid for the header:
+**Rust `239 → 196 ns`** (−18 %; its view getters return `&str`/`&[u8]` — fully zero-copy),
+**TS `3318 → 3135 ns`** (−6 %; a bespoke positions-scanning view skips the unread `keyId`),
+**Odin `297 → 281 ns`** (−5 %; its getters already borrowed, so mostly a cleanup), and
+**Swift ~unchanged** (`≈1860 ns`; CryptoKit-bound, and its getters still allocate — kept for
+consistency). Where the header was a real fraction (Mojo, Rust) the win is large; where
+crypto dominates (Swift, TS) it is small — exactly as the profile predicted.
 **Python** is the outlier: its target is the *reflective* Fork-A codec (no direct
 builder, eager restore instead of lazy) — a notebook/oracle layer, not an optimized
 codec — so its Dagr numbers are ~10× its native JSON, unlike the compiled targets.
