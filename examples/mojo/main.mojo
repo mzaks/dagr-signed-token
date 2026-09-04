@@ -413,10 +413,94 @@ def bench() raises:
     if sink == 12345678:
         print("")
 
+# Decompose verify's ~640 ns into phases so the bottleneck is visible.
+def profile() raises:
+    var n = 200000
+    var tok = mint_direct(String("HS256"), EXP)
+    if verify(tok, SECRET, NOW) != String(""):
+        raise Error("verify must accept")
+    # (root_off, body) exactly as the gate's HMAC signs — the headerless serialize yields the
+    # same body bytes (the header is prepended AFTER signing), so timing the HMAC over these
+    # is representative of what the gate recomputes.
+    var a = _build_arena(EXP)
+    var buf0 = serialize_claims_graph(a)
+    var fr = read_leb(Span(buf0), 0)
+    var root_off = Int(fr[0] >> 2)
+    var body = _tail(buf0, fr[1])
+    var sink: UInt64 = 0
+
+    @parameter
+    def noop(hdr: Jws, ro: Int, b: Span[UInt8, ImmutAnyOrigin]) raises:
+        pass
+
+    # 1) full verify
+    for _ in range(n // 10):
+        sink += UInt64(verify(tok, SECRET, NOW).byte_length())
+    var t0 = perf_counter_ns()
+    for _ in range(n):
+        sink += UInt64(verify(tok, SECRET, NOW).byte_length())
+    var t_full = Int(perf_counter_ns() - t0) // n
+
+    # 2) HMAC over the preimage — the crypto the gate runs
+    for _ in range(n // 10):
+        var s = hmac_sha256_preimage(SECRET, root_off, Span(body)); sink += UInt64(s[0])
+    var t1 = perf_counter_ns()
+    for _ in range(n):
+        var s = hmac_sha256_preimage(SECRET, root_off, Span(body)); sink += UInt64(s[0])
+    var t_hmac = Int(perf_counter_ns() - t1) // n
+
+    # 3) one bare SHA-256 of the body — block-compression cost, no HMAC doubling / key blocks
+    for _ in range(n // 10):
+        var h = Sha256(); h.update(Span(body)); var d = h.finalize(); sink += UInt64(d[0])
+    var t2 = perf_counter_ns()
+    for _ in range(n):
+        var h = Sha256(); h.update(Span(body)); var d = h.finalize(); sink += UInt64(d[0])
+    var t_sha = Int(perf_counter_ns() - t2) // n
+
+    # 4) decode + lazy reads — everything verify does EXCEPT the HMAC (no-op gate)
+    for _ in range(n // 10):
+        var c = read_claims_root_with_header[noop](Span(tok)); sink += UInt64(c.expires_at())
+    var t3 = perf_counter_ns()
+    for _ in range(n):
+        var c = read_claims_root_with_header[noop](Span(tok))
+        sink += UInt64(c.expires_at())
+        var aud = c.audience()
+        if aud:
+            if aud.value() == String("dagr-api"):
+                sink += 1
+    var t_decode = Int(perf_counter_ns() - t3) // n
+
+    # 5) lazy reads only — decode the accessor ONCE, then read fields repeatedly (isolates
+    #    the field reads; decode+header-restore = t_decode - t_lazy).
+    var cc = read_claims_root_with_header[noop](Span(tok))
+    for _ in range(n // 10):
+        sink += UInt64(cc.expires_at())
+    var t4 = perf_counter_ns()
+    for _ in range(n):
+        sink += UInt64(cc.expires_at())
+        var aud2 = cc.audience()
+        if aud2:
+            if aud2.value() == String("dagr-api"):
+                sink += 1
+    var t_lazy = Int(perf_counter_ns() - t4) // n
+
+    print("PROFILE mojo verify total=" + String(t_full) + "ns  =  decode+lazy=" + String(t_decode)
+          + "ns + hmac=" + String(t_hmac) + "ns + residual(sig-compare/call)="
+          + String(t_full - t_decode - t_hmac) + "ns")
+    print("        decode+lazy " + String(t_decode) + "ns  =  framing+header-restore="
+          + String(t_decode - t_lazy) + "ns + lazy field reads=" + String(t_lazy) + "ns")
+    print("        ref: 1x bare SHA-256 of the " + String(len(body)) + "B body=" + String(t_sha)
+          + "ns (~28ns/block ≈ ring); hmac = 2 hashes: ipad+le+body then opad+innerhash")
+    if sink == 12345678:
+        print("")
+
 def main() raises:
     var args = argv()
     if len(args) >= 2 and args[1] == "bench":
         bench()
+        return
+    if len(args) >= 2 and args[1] == "profile":
+        profile()
         return
     if len(args) >= 2 and args[1] == "direct":
         var a = mint(String("HS256"), EXP)
