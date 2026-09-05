@@ -486,6 +486,34 @@ def profile() raises:
                 sink += 1
     var t_lazy = Int(perf_counter_ns() - t4) // n
 
+    # ── Mint phases ─────────────────────────────────────────────────────────────
+    for _ in range(n // 10):
+        var _v = _build_direct(EXP); sink += UInt64(_v.expires_at)
+    var t5 = perf_counter_ns()
+    for _ in range(n):
+        var _v = _build_direct(EXP); sink += UInt64(_v.expires_at)
+    var t_build = Int(perf_counter_ns() - t5) // n
+
+    # bare build: Claims scalars/strings/scopes only (custom=None) — isolates the recursive
+    # JSON tree (ArcPointer heap boxes + Lists) cost = t_build - t_bare.
+    for _ in range(n // 10):
+        var _b = DirectClaims(Optional[String](String("user-42")), Optional[String](String("https://issuer.dagr.one")), Optional[String](String("dagr-api")), NOW, EXP, [String("read:profile"), String("write:posts")], None); sink += UInt64(_b.expires_at)
+    var t5b = perf_counter_ns()
+    for _ in range(n):
+        var _b = DirectClaims(Optional[String](String("user-42")), Optional[String](String("https://issuer.dagr.one")), Optional[String](String("dagr-api")), NOW, EXP, [String("read:profile"), String("write:posts")], None); sink += UInt64(_b.expires_at)
+    var t_bare = Int(perf_counter_ns() - t5b) // n
+
+    for _ in range(n // 10):
+        var _m = mint_direct(String("HS256"), EXP); sink += UInt64(_m[0])
+    var t6 = perf_counter_ns()
+    for _ in range(n):
+        var _m = mint_direct(String("HS256"), EXP); sink += UInt64(_m[0])
+    var t_mint = Int(perf_counter_ns() - t6) // n
+
+    print("PROFILE mojo mint total=" + String(t_mint) + "ns  =  build_tree=" + String(t_build)
+          + "ns + serialize+hmac=" + String(t_mint - t_build) + "ns  (hmac≈" + String(t_hmac) + "ns)")
+    print("        build_tree " + String(t_build) + "ns  =  Claims scalars/strings/scopes="
+          + String(t_bare) + "ns + custom JSON tree (ArcPointers+Lists)=" + String(t_build - t_bare) + "ns")
     print("PROFILE mojo verify total=" + String(t_full) + "ns  =  decode+lazy=" + String(t_decode)
           + "ns + hmac=" + String(t_hmac) + "ns + residual(sig-compare/call)="
           + String(t_full - t_decode - t_hmac) + "ns")
