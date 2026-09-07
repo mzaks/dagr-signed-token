@@ -13,7 +13,9 @@
 #  • Not a fair JWT fight, by design — Dagr is a typed binary graph with cross-language
 #    byte-identity + verify-before-parse; JWT is base64url JSON. The size gap is the
 #    honest headline; speed is runtime/crypto-dependent.
-#  • Crypto differs per language (Rust/Mojo hand-roll SHA-256; Swift=CommonCrypto,
+#  • Crypto differs per language (Rust/Mojo hand-roll SHA-256 — Mojo on the target's own
+#    SHA instructions: ARMv8 crypto, x86-64 SHA-NI, else scalar; Swift=CommonCrypto on
+#    macOS and hand-rolled elsewhere,
 #    TS=node:crypto, Odin=core:crypto). So verify time reflects the platform's crypto too,
 #    not just the format read.
 #  • JWT-lib overheads differ too: JWTKit (Swift) is async + BoringSSL HMAC, jsonwebtoken

@@ -40,9 +40,12 @@ gen/                 COMMITTED generated code: gen/{swift,rust,typescript,mojo,o
 examples/
   rust/              Cargo bin — path-deps the generated crate; sha256.rs is hand-rolled
   swift/             main.swift + Crypto.swift, compiled against gen/swift sources
+                     (HMAC: CommonCrypto on macOS, hand-rolled elsewhere)
   swift-jwt-bench/   standalone SwiftPM package — JWTKit HS256 JWT baseline for the benchmark
   typescript/        demo.ts — imports gen/typescript, HMAC via node:crypto
-  mojo/              main.mojo — imports gen/mojo, hand-rolled HMAC + native file I/O
+  mojo/              main.mojo — imports gen/mojo + crypto.mojo, native file I/O
+                     crypto.mojo — hand-rolled HMAC-SHA256; the SHA-256 core is picked at
+                     comptime: ARMv8 crypto, x86-64 SHA-NI, or a portable scalar fallback
   odin/              main.odin — imports gen/odin + its runtime, HMAC via core:crypto/hmac
   python-ffi/        Python over a Rust cdylib (ctypes) — fast, self-contained; see its README
 run_cross_lang.sh    (build →) mint in each language → N×N verify → assert byte-identity
@@ -52,8 +55,15 @@ run_bench.sh         (build optimized →) 50k-rep mint/verify per language → 
 ## Prerequisites
 
 The examples build from the **committed** `gen/` — you do **not** need the `dagr` CLI.
-You need: `cargo` / `rustc`, `swiftc` (macOS), `node` (v22+; the TS demo runs via `npx tsx`),
-`pixi` (for Mojo — the example builds against a Mojo pixi environment), and `odin`.
+You need: `cargo` / `rustc`, `swiftc`, `node` (v22+; the TS demo runs via `npx tsx`),
+`pixi` (for Mojo — the example builds against a Mojo pixi environment, locked for
+`osx-arm64` and `linux-64`), and `odin`.
+
+All five languages build, cross-verify and benchmark on **both macOS-arm64 and Linux-x86_64**,
+so `run_cross_lang.sh` and `run_bench.sh` run end to end on either. The two platform-specific
+pieces are handled in-tree and stay dependency-free: Swift's HMAC is CommonCrypto on macOS and
+hand-rolled where CommonCrypto does not exist, and Mojo's SHA-256 core is chosen at comptime
+(ARMv8 crypto / x86-64 SHA-NI / portable scalar).
 
 ## Regenerate the code (optional)
 
@@ -79,7 +89,8 @@ swiftc -O gen/swift/Sources/dagr_signed_token/*.swift examples/swift/Crypto.swif
 # TypeScript
 npx tsx examples/typescript/demo.ts
 
-# Mojo (self-contained pixi project in examples/mojo; hand-rolled HMAC + native file I/O)
+# Mojo (self-contained pixi project in examples/mojo; hand-rolled HMAC + native file I/O;
+#       macOS-arm64 and Linux-x86_64)
 pixi run --manifest-path examples/mojo/pixi.toml \
   mojo run -I gen/mojo examples/mojo/main.mojo
 
@@ -132,7 +143,8 @@ with the same claims via that language's *real* JWT library — **Rust `jsonwebt
 the *format*. **Python** here is a `ctypes` binding over the Rust codec
 (`examples/python-ffi`), not an independent implementation. The Rust Dagr side uses **`ring`**
 for HMAC-SHA256 (the same asm crypto `jsonwebtoken` uses, so *that* comparison is
-crypto-matched); Swift Dagr uses **CommonCrypto**. **Mojo** shows two arena-free build
+crypto-matched); Swift Dagr uses **CommonCrypto** on macOS and a hand-rolled
+SHA-256/HMAC where CommonCrypto is absent (Linux), which costs it ~1.2 µs/op. **Mojo** shows two arena-free build
 strategies: **`reflect`** —
 serialize straight from a live value struct via comptime reflection, no intermediate tree —
 and **`tree`** — a `DirectJson` value tree. Representative run (Apple Silicon; ns/op —
@@ -151,6 +163,36 @@ ratios, not absolutes):
 | mojo | dagr (reflect) | 1015 | 360 | 207 |
 | mojo | dagr (tree) | 1355 | 360 | 207 |
 | odin | dagr | 785 | 283 | 207 |
+
+> The `swift dagr` verify row above predates a fix to `hmacValid`'s constant-time compare,
+> which had been indexing `Data` byte-by-byte (~450 ns of every verify, on both platforms —
+> `Data`'s subscript re-resolves its backing on each access). Reading both sides through
+> `withUnsafeBytes` removed it; on Linux that took Swift verify 2389 → 1902 ns. The macOS
+> row has not been re-measured since.
+
+The same harness on **Linux x86-64** (Ryzen AI 9 HX 370, Node 25, Swift 6.3) — a different
+machine *and* different per-language crypto, so read it against itself, not against the table
+above:
+
+| lang | impl | mint (ns) | verify (ns) | size (B) |
+|---|---|--:|--:|--:|
+| rust | dagr | 455 | **290** | **207** |
+| rust | jwt (`jsonwebtoken`) | 762 | 1612 | 395 |
+| swift | dagr | 4118 | 1902 | 207 |
+| swift | jwt (`JWTKit`) | 20866 | 26448 | 368 |
+| ts | dagr | 12880 | 3100 | 207 |
+| ts | jwt (`jsonwebtoken`) | 2606 | 3280 | 395 |
+| python | dagr (`ctypes`→Rust) | 5620 | 4204 | 207 |
+| python | jwt (`PyJWT`) | 6495 | 8206 | 365 |
+| mojo | dagr (reflect) | 635 | 458 | 207 |
+| mojo | dagr (tree) | 829 | 458 | 207 |
+| odin | dagr | 899 | 316 | 207 |
+
+Sizes are identical, as they must be. Two rows move for platform reasons rather than format
+reasons: **Swift** verify is the hand-rolled HMAC standing in for CommonCrypto (its SHA-256
+compression is ~240 ns/block against CommonCrypto's asm), and **Mojo** verify (360 → 458 ns)
+is SHA-NI in place of the ARMv8 crypto extensions. **TS** mint is ~2.6× slower on this box —
+a Node/JIT difference, not a codec change.
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
 every language (schema-driven: field names never hit the wire, no base64 33 % inflation;
@@ -204,9 +246,11 @@ which a single-pass `gate` closure fixed, ~12360 → ~8420 ns). Two later passes
 
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
 is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo
-implements SHA-256 natively on the **ARMv8 crypto intrinsics** — `sha256h`/`h2`/`su0`/`su1`
-via `llvm_intrinsic`, the same hardware `ring` uses, no FFI; Swift = CommonCrypto, TS =
-`node:crypto`, Odin = `core:crypto`), so cross-language `verify` times
+implements SHA-256 natively on **whatever SHA acceleration the target has**, selected at
+comptime — the **ARMv8 crypto intrinsics** (`sha256h`/`h2`/`su0`/`su1`) or **x86-64 SHA-NI**
+(`sha256rnds2`/`msg1`/`msg2`) via `llvm_intrinsic`, the same hardware `ring` uses, no FFI,
+with a portable scalar core where neither exists; Swift = CommonCrypto on macOS and a
+hand-rolled SHA-256/HMAC elsewhere, TS = `node:crypto`, Odin = `core:crypto`), so cross-language `verify` times
 reflect the platform's crypto, not only the format read. The `jwt` rows likewise aren't
 comparable *to each other* — each is a different library architecture (JWTKit is async on
 SwiftCrypto/BoringSSL, `jsonwebtoken` is sync native) — only each to
@@ -331,8 +375,8 @@ Two of the shipped targets needed generator work to join:
 - **Mojo**: taught the packed codegen to handle a **recursive union array** (`Json`'s
   `array` variant is `[Json?]`) — the reader (lazy view), writer (serde), and eager
   restore now route it through the existing two-section union-array machinery, so it
-  compiles and round-trips byte-identically. (Crypto is hand-rolled on the ARMv8 SHA
-  intrinsics; file I/O is native — no dependencies.)
+  compiles and round-trips byte-identically. (Crypto is hand-rolled on the ARMv8 SHA or
+  x86-64 SHA-NI intrinsics, whichever the target has; file I/O is native — no dependencies.)
 - **Odin**: taught the packed codegen the same **recursive union array** variant (read
   + write, coinductively breaking the self-reference through the self-delimiting array/
   union boundaries), added the **spec-14 customizable header** to its value/serde API

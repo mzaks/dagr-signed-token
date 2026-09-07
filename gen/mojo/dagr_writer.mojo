@@ -28,7 +28,7 @@ from std.memory import unsafe_memcpy, unsafe_memcmp, unsafe_memset_zero
 from std.hashlib import Hasher
 from std.bit import bit_width
 from std.sys import CompilationTarget
-from std.sys.intrinsics import llvm_intrinsic
+from std.sys.intrinsics import llvm_intrinsic, inlined_assembly
 
 
 # ── varint / zigzag helpers (free functions; also used by the generated serde) ─────
@@ -474,15 +474,16 @@ struct Builder[VT_MAX: Int = 32](Movable):
         # the continuation bits and store a single 8-byte word backward (§1.36
         # positioning), advancing the cursor by n. Handles value < 2^56 (≤ 8 LEB
         # bytes); larger values fall through to the portable loop below. This is
-        # ONLY compiled on x86-with-AVX2 (⇒ BMI2) and is UNBENCHMARKED on ARM —
-        # measure on real x86 (note: PEXT/PDEP are microcoded/slow on AMD pre-Zen3)
-        # and keep-or-revert accordingly. ARM/others always take the loop.
-        comptime if CompilationTarget.is_x86() and CompilationTarget.has_avx2():
+        # ONLY compiled on x86-with-BMI2 (note: PEXT/PDEP are microcoded/slow on AMD
+        # pre-Zen3 — measure and keep-or-revert on such parts). ARM/others take the loop.
+        # PDEP is emitted as inline asm rather than `llvm.x86.bmi.pdep.64`: current LLVM no
+        # longer exposes that intrinsic by name, and the mnemonic is stable across toolchains.
+        comptime if CompilationTarget.is_x86() and CompilationTarget._has_feature["bmi2"]():
             if value < (UInt64(1) << 56):
                 var n = leb_length(value)
-                var spread = llvm_intrinsic[
-                    "llvm.x86.bmi.pdep.64", UInt64, has_side_effect=False](
-                    value, UInt64(0x7f7f7f7f7f7f7f7f))
+                var spread = inlined_assembly[
+                    "pdepq $2, $1, $0", UInt64, constraints="=r,r,r",
+                    has_side_effect=False](value, UInt64(0x7f7f7f7f7f7f7f7f))
                 var cont = UInt64(0x8080808080808080) & (
                     (UInt64(1) << UInt64(8 * (n - 1))) - 1)
                 comptime if check:

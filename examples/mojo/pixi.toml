@@ -2,7 +2,7 @@
 authors = ["Maxim Zaks <maxim.zaks@googlemail.com>"]
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "dst-mojo"
-platforms = ["osx-arm64"]
+platforms = ["osx-arm64", "linux-64"]
 version = "0.1.0"
 
 # Self-contained Mojo toolchain for the dagr-signed-token Mojo example, so the

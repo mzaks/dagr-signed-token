@@ -12,7 +12,7 @@
 # is accepted; the accessor struct pins a concrete `Self.o` for node-ref chaining.
 from std.bit import count_trailing_zeros
 from std.sys import CompilationTarget
-from std.sys.intrinsics import llvm_intrinsic
+from std.sys.intrinsics import llvm_intrinsic, inlined_assembly
 from std.memory import unsafe_memcpy
 
 
@@ -25,9 +25,11 @@ def read_leb(buf: Span[UInt8, _], at: Int) raises -> Tuple[UInt64, Int]:
     # One bounds-checked u64 load; `cttz(~raw & 0x80..80)` gives the length; PEXT
     # gathers the 7-bit groups in one instruction. Handles values ≤ 8 LEB bytes
     # wholly in-bounds; the buffer tail (<8 bytes left) and 9–10-byte values fall
-    # through to the portable loop. ONLY compiled on x86-with-AVX2 (⇒ BMI2)
+    # through to the portable loop. ONLY compiled on x86-with-BMI2
     # (PEXT is slow on AMD pre-Zen3 — measure and keep-or-revert on such parts).
-    comptime if CompilationTarget.is_x86() and CompilationTarget.has_avx2():
+    # PEXT is emitted as inline asm rather than `llvm.x86.bmi.pext.64`: current LLVM no
+    # longer exposes that intrinsic by name, and the mnemonic is stable across toolchains.
+    comptime if CompilationTarget.is_x86() and CompilationTarget._has_feature["bmi2"]():
         if at + 8 <= len(buf):
             var raw = (buf.unsafe_ptr().unsafe_offset(at)).unsafe_bitcast[UInt64]().unsafe_load[alignment=1]()
             var clear = (~raw) & UInt64(0x8080808080808080)
@@ -35,8 +37,9 @@ def read_leb(buf: Span[UInt8, _], at: Int) raises -> Tuple[UInt64, Int]:
                 var n = (Int(count_trailing_zeros(clear)) >> 3) + 1
                 var pmask = UInt64(0x7f7f7f7f7f7f7f7f) & (
                     (~UInt64(0)) >> UInt64(64 - 8 * n))
-                var value = llvm_intrinsic[
-                    "llvm.x86.bmi.pext.64", UInt64, has_side_effect=False](raw, pmask)
+                var value = inlined_assembly[
+                    "pextq $2, $1, $0", UInt64, constraints="=r,r,r",
+                    has_side_effect=False](raw, pmask)
                 return (value, n)
     # ── single-byte fast prefix (the dominant case) ────────────────────────────
     # Most LEBs in practice are one byte (small tags / values < 128). A dedicated
