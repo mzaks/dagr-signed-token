@@ -2,9 +2,11 @@
 # Benchmark harness for dagr-signed-token.
 #
 # Builds each language OPTIMIZED, runs its in-process `bench` (warm-up + 50k reps of
-# mint & verify, correctness-gated), and tabulates ns/op + token size. Three languages
-# (Rust/TS/Python) also bench an equivalent classic HS256 JWT (same claims, same HMAC)
-# for a size + speed comparison.
+# mint & verify, correctness-gated), and tabulates ns/op + token size. Four languages
+# (Rust/Swift/TS/Python) also bench an equivalent classic HS256 JWT via that language's
+# real JWT library (jsonwebtoken / JWTKit / jsonwebtoken / PyJWT), same claims, for a
+# size + speed comparison. (Swift's JWTKit baseline is a standalone SwiftPM package under
+# examples/swift-jwt-bench so the demo/cross-lang Swift build stays zero-dep.)
 #
 # CAVEATS (read before drawing conclusions):
 #  • Not a fair JWT fight, by design — Dagr is a typed binary graph with cross-language
@@ -13,6 +15,9 @@
 #  • Crypto differs per language (Rust/Mojo hand-roll scalar SHA-256; Swift=CryptoKit,
 #    TS=node:crypto, Python=hashlib, Odin=core:crypto). So verify time reflects the
 #    platform's crypto too, not just the format read.
+#  • JWT-lib overheads differ too: JWTKit (Swift) is async + BoringSSL HMAC, PyJWT is pure
+#    Python, jsonwebtoken (Rust/TS) is sync native — so the `jwt` rows aren't comparable to
+#    each other, only each to its own language's `dagr` row.
 #  • Numbers are wall-clock ns/op on THIS machine; treat as ratios, not absolutes.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -28,6 +33,10 @@ cargo build --release --quiet --features bench --manifest-path examples/rust/Car
 RUST=(./examples/rust/target/release/dst)
 swiftc -O gen/swift/Sources/dagr_signed_token/*.swift examples/swift/Crypto.swift examples/swift/main.swift -o examples/swift/dst-swift
 SWIFT=(./examples/swift/dst-swift)
+# Swift JWT baseline = Vapor's JWTKit (real lib, like Rust/TS jsonwebtoken). Own SwiftPM
+# package so the demo/cross-lang Swift build above stays zero-dep (plain swiftc).
+swift build --package-path examples/swift-jwt-bench -c release >/dev/null
+SWIFT_JWT=(./examples/swift-jwt-bench/.build/release/swift-jwt-bench)
 TS=(npx --yes tsx examples/typescript/demo.ts)
 PYTHON=(python3 examples/python/demo.py)
 MOJO_PIXI="${MOJO_PIXI:-$ROOT/examples/mojo/pixi.toml}"
@@ -38,7 +47,7 @@ odin build examples/odin -out:examples/odin/dst-odin -o:speed
 ODIN=(./examples/odin/dst-odin)
 
 bench_rust()   { "${RUST[@]}"   bench; }
-bench_swift()  { "${SWIFT[@]}"  bench; }
+bench_swift()  { "${SWIFT[@]}"  bench; "${SWIFT_JWT[@]}"; }   # dagr + JWTKit baseline
 bench_ts()     { "${TS[@]}"     bench; }
 bench_python() { "${PYTHON[@]}" bench; }
 bench_mojo()   { "${MOJO[@]}"   bench; }
