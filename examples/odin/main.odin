@@ -84,6 +84,33 @@ mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []
 	return tok.claims_writer_to_bytes_with_header(w, claims, &ctx, header_fn)
 }
 
+// Profiling helpers: serialize the same claims with a fixed signature — no preimage, no HMAC —
+// to isolate the writer's build+serialize cost from the crypto.
+FIXED_SIG := [32]u8{}
+header_noop :: proc(ctx: rawptr, root_offset: int, body: []u8) -> tok.Jws_Value {
+	return tok.Jws_Value{algorithm = "HS256", key_id = KID, signature = FIXED_SIG[:]}
+}
+mint_nohmac :: proc(w: ^tok.Claims_Writer, exp: u64) -> []u8 {
+	roles := []Maybe(tok.Json_Value){
+		tok.Json_Value{tag = .string, string = "admin"},
+		tok.Json_Value{tag = .string, string = "billing"},
+	}
+	fp := []u8{0xDE, 0xAD, 0xBE, 0xEF}
+	members := []tok.JsonMember_Value{
+		{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},
+		{key = "roles", value = tok.Json_Value{tag = .array, array = roles}},
+		{key = "mfa", value = tok.Json_Value{tag = .bool, bool = true}},
+		{key = "fp", value = tok.Json_Value{tag = .data, data = fp}},
+	}
+	custom := tok.Json_Value{tag = .object, object = members}
+	scopes := []string{"read:profile", "write:posts"}
+	claims := tok.Claims_Value{
+		subject = "user-42", issuer = "https://issuer.dagr.one", audience = "dagr-api",
+		issued_at = NOW, expires_at = exp, scopes = scopes, custom = custom,
+	}
+	return tok.claims_writer_to_bytes_with_header(w, claims, nil, header_noop)
+}
+
 Verify_Ctx :: struct { secret: string, reason: string }
 
 // Gate (runs before the body is parsed): alg pinned + constant-time HMAC check.
@@ -205,6 +232,28 @@ main :: proc() {
 		for _ in 0 ..< n { if verify(tok, SECRET, NOW).ok { sink += 1 } }
 		dv := time.duration_nanoseconds(time.tick_since(t1)) / i64(n)
 		fmt.printf("BENCH odin dagr mint=%d verify=%d size=%d\n", dm, dv, len(tok))
+		if sink == 12345678 { fmt.println("") }
+		return
+	}
+	if len(args) >= 2 && args[1] == "profile" {
+		n := 50000
+		m0 := mint(&w, SECRET, "HS256", EXP)
+		body := make([]u8, len(m0)); copy(body, m0); defer delete(body)
+		key := transmute([]u8)string(SECRET)
+		sink: u64 = 0
+		for _ in 0 ..< n / 10 { m := mint(&w, SECRET, "HS256", EXP); sink += u64(m[0]) }
+		t0 := time.tick_now()
+		for _ in 0 ..< n { m := mint(&w, SECRET, "HS256", EXP); sink += u64(m[0]) }
+		dm := time.duration_nanoseconds(time.tick_since(t0)) / i64(n)
+		for _ in 0 ..< n / 10 { m := mint_nohmac(&w, EXP); sink += u64(m[0]) }
+		ts := time.tick_now()
+		for _ in 0 ..< n { m := mint_nohmac(&w, EXP); sink += u64(m[0]) }
+		dser := time.duration_nanoseconds(time.tick_since(ts)) / i64(n)
+		for _ in 0 ..< n / 10 { msg := preimage(0, body); tag := hmac_sha256(key, msg); sink += u64(tag[0]); delete(msg); delete(tag) }
+		th := time.tick_now()
+		for _ in 0 ..< n { msg := preimage(0, body); tag := hmac_sha256(key, msg); sink += u64(tag[0]); delete(msg); delete(tag) }
+		dh := time.duration_nanoseconds(time.tick_since(th)) / i64(n)
+		fmt.printf("PROFILE odin mint=%dns = serialize(no-hmac)=%dns + hmac(preimage+sum)=%dns\n", dm, dser, dh)
 		if sink == 12345678 { fmt.println("") }
 		return
 	}
