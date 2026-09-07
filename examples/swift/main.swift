@@ -46,14 +46,14 @@ func mint(secret: Data, alg: String, exp: UInt64) throws -> Data {
 
 // Direct Graph Builder ("31 Direct Graph Builder.md"): mint the SAME token from a plain
 // value tree, arena-free. Must be byte-identical to `mint` (spec §6 gate).
-func mintDirect(secret: Data, alg: String, exp: UInt64) throws -> Data {
+func directClaims(exp: UInt64) -> Token.Direct.Claims {
     let custom = Token.Direct.Json.object([
         Token.Direct.JsonMember(key: "tenant", value: .string("acme")),
         Token.Direct.JsonMember(key: "roles", value: .array([.string("admin"), .string("billing")])),
         Token.Direct.JsonMember(key: "mfa", value: .bool(true)),
         Token.Direct.JsonMember(key: "fp", value: .data(Data([0xDE, 0xAD, 0xBE, 0xEF]))),
     ])
-    let claims = Token.Direct.Claims(
+    return Token.Direct.Claims(
         subject: "user-42",
         issuer: "https://issuer.dagr.one",
         audience: "dagr-api",
@@ -61,6 +61,10 @@ func mintDirect(secret: Data, alg: String, exp: UInt64) throws -> Data {
         expiresAt: exp,
         scopes: ["read:profile", "write:posts"],
         custom: custom)
+}
+
+func mintDirect(secret: Data, alg: String, exp: UInt64) throws -> Data {
+    let claims = directClaims(exp: exp)
     return try Token.Direct.toData(claims, header: { rootOffset, body in
         Token.Jws(algorithm: alg, keyId: KID,
                   signature: hmacSHA256(key: secret, msg: preimage(rootOffset, body)))
@@ -149,10 +153,49 @@ func bench() throws {
     if sink == 12_345_678 { print("") }
 }
 
+func profile() throws {
+    let n = 50_000
+    let tok = try mintDirect(secret: SECRET, alg: "HS256", exp: EXP)
+    var sink: UInt64 = 0
+    // Isolate CryptoKit HMAC (sign + verify) on a body-sized message.
+    let msg = Data(repeating: 0xAB, count: tok.count)
+    let tag = hmacSHA256(key: SECRET, msg: msg)
+    let tSign = timeNs(n) { sink &+= UInt64(hmacSHA256(key: SECRET, msg: msg).first ?? 0) }
+    let tVer  = timeNs(n) { if hmacValid(key: SECRET, msg: msg, tag: tag) { sink &+= 1 } }
+    // Serialize-only (no HMAC): header returns a fixed 32-byte signature.
+    let fixed = Data(repeating: 0, count: 32)
+    let claims = directClaims(exp: EXP)
+    // Granular serialize decomposition: builder init vs the store walk vs finalize/makeData.
+    let tInit = timeNs(n) { let b = DataArenaBuilder(); sink &+= b.cursor.value }
+    let tWalk = timeNs(n) { let b = DataArenaBuilder(); _ = try? claims.storePacked(with: b); sink &+= b.cursor.value }
+    let claimsNoCustom = Token.Direct.Claims(subject: "user-42", issuer: "https://issuer.dagr.one", audience: "dagr-api", issuedAt: NOW, expiresAt: EXP, scopes: ["read:profile", "write:posts"], custom: nil)
+    let tNoCustom = timeNs(n) { let b = DataArenaBuilder(); _ = try? claimsNoCustom.storePacked(with: b); sink &+= b.cursor.value }
+    print("PROFILE swift walk split: flat-claims(no custom)=\(tNoCustom)ns  custom JSON(object+AWO roles)=\(tWalk - tNoCustom)ns")
+    let tSer = timeNs(n) {
+        sink &+= UInt64((try? Token.Direct.toData(claims, header: { _, _ in
+            Token.Jws(algorithm: "HS256", keyId: KID, signature: fixed) }))?.first ?? 0)
+    }
+    print("PROFILE swift serialize breakdown: builderInit=\(tInit)ns  storeWalk=\(tWalk - tInit)ns  finalize/makeData=\(tSer - tWalk)ns  (total \(tSer)ns)")
+    // Decode-only (no HMAC): gate does nothing.
+    let tDec = timeNs(n) {
+        if let c = try? Token.lazyRoot(from: tok, header: { _, _, _ in }) {
+            sink &+= ((try? c.expiresAt) ?? 0)
+        }
+    }
+    let dm = timeNs(n) { sink &+= UInt64((try? mintDirect(secret: SECRET, alg: "HS256", exp: EXP))?.first ?? 0) }
+    let dv = timeNs(n) { if case .success = verify(tok, secret: SECRET, now: NOW) { sink &+= 1 } }
+    print("PROFILE swift mint=\(dm)ns = serialize(no-hmac)=\(tSer)ns + hmac-sign=\(tSign)ns + preimage/overhead")
+    print("PROFILE swift verify=\(dv)ns = decode/lazy(no-hmac)=\(tDec)ns + hmac-verify=\(tVer)ns")
+    print("PROFILE swift CryptoKit HMAC on \(msg.count)B: sign=\(tSign)ns verify=\(tVer)ns")
+    if sink == 12_345_678 { print("") }
+}
+
 do {
     let args = CommandLine.arguments
     if args.count >= 2, args[1] == "bench" {
         try bench()
+    } else if args.count >= 2, args[1] == "profile" {
+        try profile()
     } else if args.count >= 2, args[1] == "direct" {
         let a = try mint(secret: SECRET, alg: "HS256", exp: EXP)
         let d = try mintDirect(secret: SECRET, alg: "HS256", exp: EXP)
