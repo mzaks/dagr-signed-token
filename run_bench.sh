@@ -2,9 +2,9 @@
 # Benchmark harness for dagr-signed-token.
 #
 # Builds each language OPTIMIZED, runs its in-process `bench` (warm-up + 50k reps of
-# mint & verify, correctness-gated), and tabulates ns/op + token size. Four languages
-# (Rust/Swift/TS/Python) also bench an equivalent classic HS256 JWT via that language's
-# real JWT library (jsonwebtoken / JWTKit / jsonwebtoken / PyJWT), same claims, for a
+# mint & verify, correctness-gated), and tabulates ns/op + token size. Three languages
+# (Rust/Swift/TS) also bench an equivalent classic HS256 JWT via that language's
+# real JWT library (jsonwebtoken / JWTKit / jsonwebtoken), same claims, for a
 # size + speed comparison. (Swift's JWTKit baseline is a standalone SwiftPM package under
 # examples/swift-jwt-bench so the demo/cross-lang Swift build stays zero-dep.)
 #
@@ -12,19 +12,23 @@
 #  • Not a fair JWT fight, by design — Dagr is a typed binary graph with cross-language
 #    byte-identity + verify-before-parse; JWT is base64url JSON. The size gap is the
 #    honest headline; speed is runtime/crypto-dependent.
-#  • Crypto differs per language (Rust/Mojo hand-roll scalar SHA-256; Swift=CryptoKit,
-#    TS=node:crypto, Python=hashlib, Odin=core:crypto). So verify time reflects the
-#    platform's crypto too, not just the format read.
-#  • JWT-lib overheads differ too: JWTKit (Swift) is async + BoringSSL HMAC, PyJWT is pure
-#    Python, jsonwebtoken (Rust/TS) is sync native — so the `jwt` rows aren't comparable to
-#    each other, only each to its own language's `dagr` row.
+#  • Crypto differs per language (Rust/Mojo hand-roll SHA-256; Swift=CommonCrypto,
+#    TS=node:crypto, Odin=core:crypto). So verify time reflects the platform's crypto too,
+#    not just the format read.
+#  • JWT-lib overheads differ too: JWTKit (Swift) is async + BoringSSL HMAC, jsonwebtoken
+#    (Rust/TS) is sync native — so the `jwt` rows aren't comparable to each other, only each
+#    to its own language's `dagr` row.
 #  • Numbers are wall-clock ns/op on THIS machine; treat as ratios, not absolutes.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
-echo "== [gen] dagr build =="
-dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json" >/dev/null
+if command -v dagr >/dev/null 2>&1; then
+  echo "== [gen] dagr build (closed-source CLI found — regenerating gen/) =="
+  dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json" >/dev/null
+else
+  echo "== [gen] using committed gen/ (dagr CLI not on PATH) =="
+fi
 
 echo "== [build] optimized binaries =="
 # `bench` feature: RustCrypto HMAC for Dagr (real-crypto) + the `jsonwebtoken` crate as
@@ -38,7 +42,6 @@ SWIFT=(./examples/swift/dst-swift)
 swift build --package-path examples/swift-jwt-bench -c release >/dev/null
 SWIFT_JWT=(./examples/swift-jwt-bench/.build/release/swift-jwt-bench)
 TS=(npx --yes tsx examples/typescript/demo.ts)
-PYTHON=(python3 examples/python/demo.py)
 MOJO_PIXI="${MOJO_PIXI:-$ROOT/examples/mojo/pixi.toml}"
 pixi run --manifest-path "$MOJO_PIXI" mojo build -I "$ROOT/gen/mojo" \
   "$ROOT/examples/mojo/main.mojo" -o "$ROOT/examples/mojo/dst-mojo" >/dev/null
@@ -49,11 +52,10 @@ ODIN=(./examples/odin/dst-odin)
 bench_rust()   { "${RUST[@]}"   bench; }
 bench_swift()  { "${SWIFT[@]}"  bench; "${SWIFT_JWT[@]}"; }   # dagr + JWTKit baseline
 bench_ts()     { "${TS[@]}"     bench; }
-bench_python() { "${PYTHON[@]}" bench; }
 bench_mojo()   { "${MOJO[@]}"   bench; }
 bench_odin()   { "${ODIN[@]}"   bench; }
 
-LANGS=(rust swift ts python mojo odin)
+LANGS=(rust swift ts mojo odin)
 OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
 
 echo

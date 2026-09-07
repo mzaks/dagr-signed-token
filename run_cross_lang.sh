@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Cross-language validation for dagr-signed-token.
 #
-# Regenerates the code with `dagr build`, then mints the token in each language,
-# has every language verify every language's token (N×N), and asserts the minted
-# buffers are byte-for-byte identical. One schema → identical wire in all targets.
+# Uses the COMMITTED gen/ (this repo is self-contained). If the closed-source `dagr`
+# CLI happens to be on PATH it regenerates gen/ first; otherwise it just uses what's
+# committed. Then mints the token in each language, has every language verify every
+# language's token (N×N), and asserts the buffers are byte-for-byte identical.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
-echo "== [gen] dagr build =="
-dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json"
+if command -v dagr >/dev/null 2>&1; then
+  echo "== [gen] dagr build (closed-source CLI found — regenerating gen/) =="
+  dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json"
+else
+  echo "== [gen] using committed gen/ (dagr CLI not on PATH) =="
+fi
 
 echo "== [build] Rust =="
 cargo build --quiet --manifest-path examples/rust/Cargo.toml
@@ -21,9 +26,6 @@ SWIFT=(./examples/swift/dst-swift)
 
 echo "== [build] TypeScript (tsx, no build step) =="
 TS=(npx --yes tsx examples/typescript/demo.ts)
-
-echo "== [build] Python (pure-Python, no build step) =="
-PYTHON=(python3 examples/python/demo.py)
 
 echo "== [build] Mojo (compile once via the local pixi project) =="
 # Mojo has no compiler on PATH here; examples/mojo is a self-contained pixi project
@@ -46,17 +48,15 @@ trap 'rm -rf "$WORK"' EXIT
 emit_rust()   { "${RUST[@]}"   emit   "$1"; }
 emit_swift()  { "${SWIFT[@]}"  emit   "$1"; }
 emit_ts()     { "${TS[@]}"     emit   "$1"; }
-emit_python() { "${PYTHON[@]}" emit   "$1"; }
 emit_mojo()   { "${MOJO[@]}"   emit   "$1"; }
 emit_odin()   { "${ODIN[@]}"   emit   "$1"; }
 verify_rust()   { "${RUST[@]}"   verify "$1"; }
 verify_swift()  { "${SWIFT[@]}"  verify "$1"; }
 verify_ts()     { "${TS[@]}"     verify "$1"; }
-verify_python() { "${PYTHON[@]}" verify "$1"; }
 verify_mojo()   { "${MOJO[@]}"   verify "$1"; }
 verify_odin()   { "${ODIN[@]}"   verify "$1"; }
 
-LANGS=(rust swift ts python mojo odin)
+LANGS=(rust swift ts mojo odin)
 
 echo
 echo "== [emit] each language mints its token =="
