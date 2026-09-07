@@ -67,8 +67,8 @@ TOKEN = DataGraph(
 )
 
 # Targets = the languages that support BOTH the customizable header (spec 14) AND a
-# recursive union under a frozen+packed node: Swift, Rust, TypeScript, Python (Fork A),
-# Mojo, and Odin. See README "Language coverage" for why the rest are out:
+# recursive union under a frozen+packed node: Swift, Rust, TypeScript, Mojo, and Odin
+# (Python via examples/python-ffi). See README "Language coverage" for why the rest are out:
 #   • Kotlin / Zig  — no customizable header yet
 library = Library(
     "dagr-signed-token",
@@ -77,7 +77,6 @@ library = Library(
         Swift(out="gen/swift", features=["lazy"]),
         Rust(out="gen/rust", features=["lazy"]),
         TypeScript(out="gen/typescript"),
-        Python(out="gen/python"),
         Mojo(out="gen/mojo"),
         Odin(out="gen/odin"),
     ],
