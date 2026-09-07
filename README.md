@@ -311,10 +311,9 @@ every Dagr target supports that combination yet:
 | Python (Fork A) | ✅ | ✅ (reflective) | ❌ — runtime needs the closed-source DSL |
 | Kotlin / Zig | ❌ — no header | — | — |
 
-Python still ships — just not as the reflective codec: **`examples/python-ffi/`** binds the
-generated **Rust** codec through a small C ABI (`ctypes`), so it's byte-identical, ~13–17×
-the pure-Python speed, and self-contained (the cdylib has no `dagr_dsl` dependency). See
-`examples/python-ffi/README.md`.
+For Python, **`examples/python-ffi/`** calls the generated Rust codec through a small C ABI
+(`ctypes`): byte-identical to the other targets, and faster + 43% smaller than an equivalent
+PyJWT token (details in `examples/python-ffi/README.md`).
 
 Two of the shipped targets needed generator work to join:
 

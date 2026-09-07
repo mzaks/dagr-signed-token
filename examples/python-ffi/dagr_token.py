@@ -1,15 +1,14 @@
-"""dagr-signed-token — Python binding over the Rust cdylib (ctypes).
+"""dagr-signed-token — Python binding over the Rust codec (ctypes).
 
-Python calls straight into the generated Dagr codec for mint/verify/read, so it's
-~native speed and byte-identical to the other targets — and self-contained (the cdylib
-path-deps the committed gen/rust; no closed-source dagr CLI at runtime, unlike Fork A).
+Mint, verify, and read the token by calling the compiled cdylib. The token is a compact
+binary graph (207 bytes); reads fetch only the field requested.
 
     tok = mint(secret, exp)                 # -> 207-byte token
     verify(tok, secret, now)                # raises Rejected on any failure
-    c = open(tok, secret, now)              # verify, then a path-query view
-    c.expires_at ; c.subject ; c.audience   # typed registered claims
+    c = open(tok, secret, now)              # verify, then read claims on demand
+    c.expires_at ; c.subject ; c.audience   # registered claims
     c.scopes[0].value() ; len(c.scopes)
-    c.custom["roles"][0].value()            # freeform claim, pinpoint read
+    c.custom["roles"][0].value()            # freeform claim, read pinpoint
 """
 import ctypes, os, sys
 from ctypes import (c_uint8, c_uint64, c_size_t, c_int32, c_int64, c_double,

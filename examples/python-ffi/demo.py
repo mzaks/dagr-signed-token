@@ -1,5 +1,4 @@
-"""Showcase: Python mints/verifies/reads the shared token via the Rust cdylib (ctypes).
-Byte-identical to the other targets; verify-before-parse + path-query reads."""
+"""Python mints, verifies, and reads the token through the Rust cdylib (ctypes)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dagr_token as dt
@@ -27,7 +26,7 @@ def main():
     _show("alg:none token", lambda: dt.verify(dt.mint(SECRET, EXP, alg="none"), SECRET, NOW))
     _show("expired token",  lambda: dt.verify(dt.mint(SECRET, NOW - 1), SECRET, NOW))
 
-    print("\nClaims (verify-before-parse, then PATH-QUERY reads — no full decode):")
+    print("\nClaims (read on demand after verify — only the requested field is decoded):")
     c = dt.open(tok, SECRET, NOW)
     print("  subject          =", c.subject)
     print("  audience         =", c.audience)

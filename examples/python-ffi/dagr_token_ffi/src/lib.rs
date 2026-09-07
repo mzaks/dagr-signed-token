@@ -1,9 +1,8 @@
-//! C-ABI over the generated Dagr codec — the native half of a `python-ffi` target.
+//! C ABI over the Dagr codec, for the Python binding (see ../README.md).
 //!
-//! Python (via ctypes) mints/verifies/reads the token by calling straight into the Rust
-//! codec: `mint` = the arena builder + hand-rolled HMAC, `verify` = the zero-alloc
-//! verify-before-parse gate, `get` = the lazy path-query cursors. Byte-identical to the
-//! other five targets; self-contained (path-deps the committed gen/rust, no dagr CLI).
+//! `mint` builds + signs the token, `verify` checks the signature before parsing any claim,
+//! `get` reads a single field by path. Buffers cross as flat (ptr, len); anything returned
+//! is owned by the caller and released with `dagr_free`.
 use std::os::raw::c_char;
 use dagr_signed_token::token::{Json, Jws, TokenArena, TokenGraph};
 use dagr_signed_token::token_lazy::{self, ClaimsAccessor, JsonPackedArrayAccessor};
@@ -65,9 +64,8 @@ fn preimage(off: usize, body: &[u8]) -> Vec<u8> {
     m
 }
 
-// The CONTRACT token (fixed claims incl `fp` = Data, which plain JSON can't round-trip) —
-// built in Rust so it stays byte-identical to the other five targets. Params: secret/alg/exp
-// (alg drives the alg:none test, exp the expiry test), exactly like the other examples' mint().
+// Build + sign the token. The claims are fixed; the parameters are the secret, the alg (so a
+// caller can mint an alg:none token) and exp (so it can mint a past expiry).
 fn contract_token(secret: &[u8], alg: &str, exp: u64) -> Vec<u8> {
     let a = TokenArena::<0>::new();
     let custom = Json::Object(vec![
