@@ -1,0 +1,12 @@
+# A C-ABI cdylib over the generated Dagr codec — the "python-ffi" target's native half.
+# Self-contained: path-deps the committed gen/rust crate, no closed-source dagr dep.
+[package]
+name = "dagr_token_ffi"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dagr_signed_token = { path = "../../../gen/rust" }

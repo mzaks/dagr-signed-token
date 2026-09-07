@@ -44,6 +44,7 @@ examples/
   typescript/        demo.ts — imports gen/typescript, HMAC via node:crypto
   mojo/              main.mojo — imports gen/mojo, hand-rolled HMAC + native file I/O
   odin/              main.odin — imports gen/odin + its runtime, HMAC via core:crypto/hmac
+  python-ffi/        Python over a Rust cdylib (ctypes) — fast, self-contained; see its README
 run_cross_lang.sh    (build →) mint in each language → N×N verify → assert byte-identity
 run_bench.sh         (build optimized →) 50k-rep mint/verify per language → ns/op table
 ```
@@ -309,6 +310,11 @@ every Dagr target supports that combination yet:
 | Odin | ✅ | ✅ | ✅ |
 | Python (Fork A) | ✅ | ✅ (reflective) | ❌ — runtime needs the closed-source DSL |
 | Kotlin / Zig | ❌ — no header | — | — |
+
+Python still ships — just not as the reflective codec: **`examples/python-ffi/`** binds the
+generated **Rust** codec through a small C ABI (`ctypes`), so it's byte-identical, ~13–17×
+the pure-Python speed, and self-contained (the cdylib has no `dagr_dsl` dependency). See
+`examples/python-ffi/README.md`.
 
 Two of the shipped targets needed generator work to join:
 
