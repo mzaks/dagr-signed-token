@@ -308,7 +308,7 @@ every Dagr target supports that combination yet:
 | TypeScript | ✅ | ✅ | ✅ |
 | Mojo | ✅ | ✅ | ✅ |
 | Odin | ✅ | ✅ | ✅ |
-| Python (Fork A) | ✅ | ✅ (reflective) | ❌ — runtime needs the closed-source DSL |
+| Python | ✅ | ✅ | ✅ (via `python-ffi`) |
 | Kotlin / Zig | ❌ — no header | — | — |
 
 For Python, **`examples/python-ffi/`** calls the generated Rust codec through a small C ABI
