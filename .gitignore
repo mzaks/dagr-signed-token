@@ -18,3 +18,11 @@ __mojocache__/
 __pycache__/
 .build/
 .swiftpm/
+
+# bench-only PyJWT venv (created by run_bench.sh)
+.bench-venv/
+
+# closed-source dagr CLI artifacts (recreated only if you have the CLI + run `dagr build`)
+dagr.lock.json
+.dagr/
+gen/python/

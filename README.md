@@ -126,36 +126,43 @@ Each language mints + verifies in-process (warm-up + 50k reps, correctness-gated
 The Dagr numbers exercise the **fast path**: arena-free **direct build** (spec 31 —
 a value tree straight to bytes, gated byte-identical to the arena) + **zero-alloc
 lazy verify** (verify-before-parse, then read fields off the buffer, no restore).
-**Rust, Swift, and TypeScript** also bench an **equivalent classic HS256 JWT**
+**Rust, Swift, TypeScript, and Python** also bench an **equivalent classic HS256 JWT**
 with the same claims via that language's *real* JWT library — **Rust `jsonwebtoken`**,
-**Swift `JWTKit`** (Vapor), **TS `jsonwebtoken`** — so the delta isolates the *format*. The Rust Dagr side uses **`ring`** for HMAC-SHA256 (the same asm
-crypto `jsonwebtoken` uses, so *that* comparison is crypto-matched); Swift Dagr uses
-**CommonCrypto**. **Mojo** shows two arena-free build strategies: **`reflect`** —
+**Swift `JWTKit`** (Vapor), **TS `jsonwebtoken`**, **Python `PyJWT`** — so the delta isolates
+the *format*. **Python** here is a `ctypes` binding over the Rust codec
+(`examples/python-ffi`), not an independent implementation. The Rust Dagr side uses **`ring`**
+for HMAC-SHA256 (the same asm crypto `jsonwebtoken` uses, so *that* comparison is
+crypto-matched); Swift Dagr uses **CommonCrypto**. **Mojo** shows two arena-free build
+strategies: **`reflect`** —
 serialize straight from a live value struct via comptime reflection, no intermediate tree —
 and **`tree`** — a `DirectJson` value tree. Representative run (Apple Silicon; ns/op —
 ratios, not absolutes):
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 459 | **206** | **207** |
-| rust | jwt (`jsonwebtoken`) | 897 | 1492 | 395 |
-| swift | dagr | 3505 | **806** | 207 |
-| swift | jwt (`JWTKit`) | 24977 | 30554 | 368 |
-| ts | dagr | 5074 | 2148 | 207 |
-| ts | jwt (`jsonwebtoken`) | 1700 | 2170 | 395 |
-| mojo | dagr (reflect) | 1077 | 376 | 207 |
-| mojo | dagr (tree) | 1384 | 376 | 207 |
-| odin | dagr | 2277 | 282 | 207 |
+| rust | dagr | 451 | **205** | **207** |
+| rust | jwt (`jsonwebtoken`) | 937 | 1519 | 395 |
+| swift | dagr | 3533 | **819** | 207 |
+| swift | jwt (`JWTKit`) | 25111 | 30565 | 368 |
+| ts | dagr | 4840 | 2079 | 207 |
+| ts | jwt (`jsonwebtoken`) | 1636 | 2085 | 395 |
+| python | dagr (`ctypes`→Rust) | 5047 | 2882 | 207 |
+| python | jwt (`PyJWT`) | 6025 | 7643 | 365 |
+| mojo | dagr (reflect) | 1015 | 360 | 207 |
+| mojo | dagr (tree) | 1355 | 360 | 207 |
+| odin | dagr | 2311 | 280 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
 every language (schema-driven: field names never hit the wire, no base64 33 % inflation;
 even against JWTKit's leaner 368 B, Dagr is 44 % smaller). On *speed*, the compiled targets' standout
 is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
-deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (206 vs 1492 ns, crypto
-matched); **Swift ~38×** faster than JWTKit (806 vs 30 554 ns — JWTKit is async on
-SwiftCrypto/BoringSSL); **Mojo and Odin** verify in ~300–380 ns. That's the hot path for a
-token you mint once and check on every request. **Mint** is more mixed: Rust Dagr now mints
-*faster* than a real JWT lib (459 vs 897 ns); Mojo's reflection path mints in ~1 µs; Swift
+deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (205 vs 1519 ns, crypto
+matched); **Swift ~37×** faster than JWTKit (819 vs 30 565 ns — JWTKit is async on
+SwiftCrypto/BoringSSL); **Python (ctypes→Rust) ~2.7×** faster than PyJWT (2882 vs 7643 ns);
+**Mojo and Odin** verify in ~300–360 ns. That's the hot path for a token you mint once and
+check on every request. **Mint** is more mixed: Rust Dagr now mints *faster* than a real JWT
+lib (451 vs 937 ns), and Python-over-Rust edges PyJWT (5047 vs 6025 ns); Mojo's reflection
+path mints in ~1 µs; Swift
 Dagr mint (~3.5 µs) still trails Rust — its **flat claims serialize in ~450 ns, but the
 recursive-JSON `custom` claim is ~1.9 µs** (Swift value-semantics + ARC over the generic
 `Array`/`indirect enum` store — the next optimization target, see below). In Node the
