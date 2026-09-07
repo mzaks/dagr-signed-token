@@ -150,7 +150,7 @@ ratios, not absolutes):
 | python | jwt (`PyJWT`) | 6025 | 7643 | 365 |
 | mojo | dagr (reflect) | 1015 | 360 | 207 |
 | mojo | dagr (tree) | 1355 | 360 | 207 |
-| odin | dagr | 2311 | 280 | 207 |
+| odin | dagr | 785 | 283 | 207 |
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
 every language (schema-driven: field names never hit the wire, no base64 33 % inflation;
@@ -270,6 +270,10 @@ list (hundreds of micro-allocations per token) and concatenated them at the end,
 encoding routed through `BigInt`. Rewritten as a **single backward-growing `Uint8Array`**
 (direct byte writes, a `number` LEB fast path, cycle late-binding recorded by cursor offset),
 it is byte-identical (6007-test suite green) and roughly halves mint: **~10.7 µs → ~5.0 µs**.
+**Odin mint** had the same chunk-list writer (`[dynamic][dynamic]u8` — a heap `make` per store
+op plus a final concat); rewriting it to a **single backward-growing buffer** (direct writes,
+late-bindings patched by cursor offset) took serialize ~1.8 µs → ~0.5 µs and mint **~2.3 µs →
+~0.75 µs** (byte-identical; roundtrip/cyclic/aligned Odin suites green).
 **Rust mint** was profiled too (`dst profile`): ~870 ns = build-tree ~200 + serialize ~525 +
 `ring` HMAC ~158, and ~70 ns of the serialize was the builder's 64 KB `alloc_uninit` —
 oversized for a 207 B token. The Direct Graph Builder only ever builds *trees* (spec 31), so

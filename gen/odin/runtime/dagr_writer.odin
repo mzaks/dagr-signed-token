@@ -1,26 +1,28 @@
 // Dagr serializer runtime (Odin) — plan 29 Track (write side).
-// A BACKWARD-growing builder: every store appends a chunk and returns the cursor (total
-// bytes stored so far). `make_data()` concatenates the chunks in REVERSE store order, so
-// the effective layout grows from the far end downward. A buffer offset is the cursor
-// value at store time; the forward distance between two stored things is `cursor - offset`.
+// A BACKWARD-growing builder: one pre-sized buffer written from the far end downward. Each
+// store fills its bytes into the tail and returns the cursor (total bytes stored so far). A
+// buffer offset is the cursor value at store time; the forward distance between two stored
+// things is `cursor - offset`. `make_data()` is then just the used tail. The live bytes are
+// `buf[len(buf)-cursor .. len(buf)]`; the absolute index of the byte at store-offset `pos`
+// is `len(buf) - pos` (stable under growth, which relocates the whole tail intact).
 // Hand-ported from RethinkingDagrMojo/src/dagr_writer.mojo (byte-exact reference).
 package dagr_reader
 
 import "core:strings"
 
 // A deferred back-edge slot for a node-ref to a node still being stored (a CYCLE), patched by
-// `finish_storing` once the target is placed. `chunk` = the placeholder chunk's index.
-//   kind 0 (bidir single ref): a fixed 8-byte u64-V62; `pos` = cursor just after it (start=pos-8);
-//                              patched with ZigZag(pos-8 - target).
+// `finish_storing` once the target is placed. `pos` = the cursor just after the slot, so the
+// slot's bytes are at `buf[len(buf)-pos ..]`.
+//   kind 0 (bidir single ref): a fixed reserve-width u64-V62; patched with ZigZag(pos-w - target).
 //   kind 1 (node-ref array slot): an `elem_size`-byte signed slot; patched with
 //                              (array_end - target + 1) two's-complement.
-Dagr_LateBind :: struct { kind: int, id: int, chunk: int, pos: int, array_end: int, elem_size: int }
+Dagr_LateBind :: struct { kind: int, id: int, pos: int, array_end: int, elem_size: int }
 
 // Slot byte width for a signed width-code (0/1/2/3 → 1/2/4/8).
 dagr_wc_bytes :: proc(wc: int) -> int { return wc == 0 ? 1 : wc == 1 ? 2 : wc == 2 ? 4 : 8 }
 
 Builder :: struct {
-	chunks:        [dynamic][dynamic]u8,
+	buf:           [dynamic]u8,       // pre-sized backing; live bytes are buf[len(buf)-cursor:]
 	cursor:        int,
 	vt_lookup:     map[string]int,   // vtable norm-key → header offset (dedup)
 	string_lookup: map[string]int,   // utf8 content → offset (dedup)
@@ -43,8 +45,7 @@ builder_make :: proc(max_size: int = 2 * 1024 * 1024) -> Builder {
 }
 
 builder_destroy :: proc(b: ^Builder) {
-	for &c in b.chunks { delete(c) }
-	delete(b.chunks)
+	delete(b.buf)
 	for k in b.vt_lookup { delete(k) }
 	delete(b.vt_lookup)
 	for k in b.string_lookup { delete(k) }
@@ -60,9 +61,7 @@ builder_destroy :: proc(b: ^Builder) {
 // than re-allocated on the next mint. `reserve_bytes` depends on max_size, not content, so
 // it is preserved. Output is byte-identical to a fresh `builder_make`.
 builder_reset :: proc(b: ^Builder) {
-	for &c in b.chunks { delete(c) }
-	clear(&b.chunks)
-	b.cursor = 0
+	b.cursor = 0   // keep buf allocated for reuse; writes overwrite, make_data reads only the tail
 	for k in b.vt_lookup { delete(k) }
 	clear(&b.vt_lookup)
 	for k in b.string_lookup { delete(k) }
@@ -85,10 +84,10 @@ begin_storing :: proc(b: ^Builder, id: int) -> (int, int) {
 }
 
 store_bidir_placeholder :: proc(b: ^Builder, id: int) -> int {
-	c := make([dynamic]u8, b.reserve_bytes)   // zero placeholder = an as-yet-unresolved V62 whose width
-	                                          // is the max_size-derived reserve (spec 05 "dummy references")
-	pos := _push(b, c)
-	append(&b.late_bindings, Dagr_LateBind{kind = 0, id = id, chunk = len(b.chunks) - 1, pos = pos})
+	base := _reserve(b, b.reserve_bytes)                  // zero placeholder = an as-yet-unresolved V62
+	for k in 0 ..< b.reserve_bytes { b.buf[base + k] = 0 }  // (width is the max_size-derived reserve)
+	pos := b.cursor
+	append(&b.late_bindings, Dagr_LateBind{kind = 0, id = id, pos = pos})
 	return pos
 }
 
@@ -109,10 +108,10 @@ store_node_ref_array_cyc :: proc(b: ^Builder, offs: []int, ready: []bool, ids: [
 	esz := dagr_wc_bytes(wc)
 	for i in 0 ..< len(offs) {
 		if !ready[i] {
-			ph := make([dynamic]u8, esz)   // zero placeholder slot
-			_push(b, ph)
+			base := _reserve(b, esz)                       // zero placeholder slot
+			for k in 0 ..< esz { b.buf[base + k] = 0 }
 			append(&b.late_bindings, Dagr_LateBind{kind = 1, id = ids[i],
-				chunk = len(b.chunks) - 1, array_end = cur, elem_size = esz})
+				pos = b.cursor, array_end = cur, elem_size = esz})
 		} else {
 			_ = _store_int_wc(b, offs[i] < 0 ? 0 : cur - offs[i] + 1, wc)
 		}
@@ -127,11 +126,13 @@ finish_storing :: proc(b: ^Builder, id: int, offset: int) {
 			// bidir single ref: ZigZag(pointer_start - target), V62 at the max_size-derived reserve width.
 			reserve_wc := b.reserve_bytes == 1 ? 0 : b.reserve_bytes == 2 ? 1 : b.reserve_bytes == 4 ? 2 : 3
 			v := (to_zigzag((lb.pos - b.reserve_bytes) - offset) << 2) | u64(reserve_wc)
-			for i in 0 ..< b.reserve_bytes { b.chunks[lb.chunk][i] = u8((v >> uint(i * 8)) & 0xff) }
+			base := len(b.buf) - lb.pos
+			for i in 0 ..< b.reserve_bytes { b.buf[base + i] = u8((v >> uint(i * 8)) & 0xff) }
 		} else {
 			// node-ref array slot: signed (array_end - target + 1) at the slot width.
 			rel := u64(lb.array_end - offset + 1)
-			for i in 0 ..< lb.elem_size { b.chunks[lb.chunk][i] = u8((rel >> uint(i * 8)) & 0xff) }
+			base := len(b.buf) - lb.pos
+			for i in 0 ..< lb.elem_size { b.buf[base + i] = u8((rel >> uint(i * 8)) & 0xff) }
 		}
 	}
 	b.node_lookup[id] = offset
@@ -156,36 +157,51 @@ to_negativ_zigzag :: proc(v: u64) -> u64 {
 	return v == 0 ? 0 : ((v - 1) << 1) | 1
 }
 
-// ── core: append a chunk, return the new cursor ──────────────────────────────
+// ── core: single backward buffer ─────────────────────────────────────────────
+// Grow `buf` so at least `n` more bytes fit before the current tail (relocating the live
+// tail intact so store-offsets stay valid). `_reserve` claims an n-byte block at the tail
+// and returns its base index; the caller fills buf[base..base+n) forward (LE). No per-op alloc.
+_ensure :: proc(b: ^Builder, n: int) {
+	if b.cursor + n <= len(b.buf) { return }
+	newcap := len(b.buf) < 64 ? 64 : len(b.buf)
+	for newcap < b.cursor + n { newcap *= 2 }
+	nbuf := make([dynamic]u8, newcap)
+	if b.cursor > 0 { copy(nbuf[newcap - b.cursor:], b.buf[len(b.buf) - b.cursor:]) }
+	delete(b.buf)
+	b.buf = nbuf
+}
+_reserve :: proc(b: ^Builder, n: int) -> int {
+	_ensure(b, n)
+	b.cursor += n
+	return len(b.buf) - b.cursor
+}
+
+// Compatibility shim for the bitset helpers below (which build a small owned chunk, fill its
+// bits, then push it): copy the chunk into the buffer, free it, return the new cursor.
 _push :: proc(b: ^Builder, chunk: [dynamic]u8) -> int {
-	b.cursor += len(chunk)
-	append(&b.chunks, chunk)
+	base := _reserve(b, len(chunk))
+	if len(chunk) > 0 { copy(b.buf[base:base + len(chunk)], chunk[:]) }
+	delete(chunk)
 	return b.cursor
 }
 
 store_bytes :: proc(b: ^Builder, bytes: []u8) -> int {
-	c := make([dynamic]u8, 0, len(bytes))
-	append(&c, ..bytes)
-	return _push(b, c)
+	base := _reserve(b, len(bytes))
+	if len(bytes) > 0 { copy(b.buf[base:base + len(bytes)], bytes) }
+	return b.cursor
 }
 
 store_u8 :: proc(b: ^Builder, v: u8) -> int {
-	c := make([dynamic]u8, 0, 1); append(&c, v); return _push(b, c)
+	base := _reserve(b, 1); b.buf[base] = v; return b.cursor
 }
 store_u16 :: proc(b: ^Builder, v: u16) -> int {
-	c := make([dynamic]u8, 0, 2)
-	append(&c, u8(v & 0xff), u8((v >> 8) & 0xff))
-	return _push(b, c)
+	base := _reserve(b, 2); b.buf[base] = u8(v & 0xff); b.buf[base + 1] = u8((v >> 8) & 0xff); return b.cursor
 }
 store_u32 :: proc(b: ^Builder, v: u32) -> int {
-	c := make([dynamic]u8, 0, 4)
-	for i in 0 ..< 4 { append(&c, u8((v >> uint(i * 8)) & 0xff)) }
-	return _push(b, c)
+	base := _reserve(b, 4); for i in 0 ..< 4 { b.buf[base + i] = u8((v >> uint(i * 8)) & 0xff) }; return b.cursor
 }
 store_u64 :: proc(b: ^Builder, v: u64) -> int {
-	c := make([dynamic]u8, 0, 8)
-	for i in 0 ..< 8 { append(&c, u8((v >> uint(i * 8)) & 0xff)) }
-	return _push(b, c)
+	base := _reserve(b, 8); for i in 0 ..< 8 { b.buf[base + i] = u8((v >> uint(i * 8)) & 0xff) }; return b.cursor
 }
 
 // Signed integers share the LE two's-complement layout of the unsigned store.
@@ -203,17 +219,22 @@ store_bool :: proc(b: ^Builder, v: bool) -> int { return store_u8(b, v ? 1 : 0) 
 
 // LEB128 unsigned varint.
 store_leb :: proc(b: ^Builder, value: u64) -> int {
+	tmp: [10]u8
+	n := 0
 	if value == 0 {
-		c := make([dynamic]u8, 0, 1); append(&c, 0); return _push(b, c)
+		tmp[0] = 0; n = 1
+	} else {
+		x := value
+		for x > 0 {
+			by := u8(x & 0x7f)
+			x >>= 7
+			tmp[n] = x > 0 ? by | 0x80 : by
+			n += 1
+		}
 	}
-	x := value
-	out := make([dynamic]u8, 0, 4)
-	for x > 0 {
-		by := u8(x & 0x7f)
-		x >>= 7
-		append(&out, x > 0 ? by | 0x80 : by)
-	}
-	return _push(b, out)
+	base := _reserve(b, n)
+	for i in 0 ..< n { b.buf[base + i] = tmp[i] }
+	return b.cursor
 }
 
 // V62 fixed-width pointer: value<<2 | widthCode (width by magnitude), min_code floor.
@@ -844,14 +865,9 @@ store_finish_alignment_padding :: proc(b: ^Builder, root_offset: int, max_n: int
 	}
 }
 
-// Finished buffer: chunks concatenated in REVERSE store order (owned; caller deletes).
+// Finished buffer: the used tail, in forward order (owned; caller deletes).
 make_data :: proc(b: ^Builder) -> []u8 {
-	total := 0
-	for c in b.chunks { total += len(c) }
-	out := make([]u8, total)
-	p := 0
-	for i := len(b.chunks) - 1; i >= 0; i -= 1 {
-		for k in 0 ..< len(b.chunks[i]) { out[p] = b.chunks[i][k]; p += 1 }
-	}
+	out := make([]u8, b.cursor)
+	if b.cursor > 0 { copy(out, b.buf[len(b.buf) - b.cursor:]) }
 	return out
 }
