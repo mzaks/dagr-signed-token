@@ -20,7 +20,7 @@ Dagr's customizable header ("14 Customizable Header.md"), **Shape A**:
 
 Everything is **dependency-free**: the codec is generated Dagr code, and the
 crypto is each platform's standard tool — Rust hand-rolls SHA-256/HMAC (validated
-against NIST + RFC 4231 vectors), Swift uses CryptoKit, TypeScript uses Node's
+against NIST + RFC 4231 vectors), Swift uses CommonCrypto, TypeScript uses Node's
 built-in `node:crypto`. Because HMAC-SHA256 is a standard and the Dagr body is
 byte-identical across languages, the signatures — and the whole 207-byte token —
 match to the byte.
@@ -119,36 +119,45 @@ Each language mints + verifies in-process (warm-up + 50k reps, correctness-gated
 The Dagr numbers exercise the **fast path**: arena-free **direct build** (spec 31 —
 a value tree straight to bytes, gated byte-identical to the arena) + **zero-alloc
 lazy verify** (verify-before-parse, then read fields off the buffer, no restore).
-Rust, TypeScript, and Python also bench an **equivalent classic HS256 JWT** with the
-same claims, so the delta isolates the *format*. The **Rust** JWT baseline is the
-**`jsonwebtoken` crate** — the standard Rust JWT library (serde-derived claims, full
-signature + `exp` + `aud` validation) — for a proper real-world comparison; the Rust
-Dagr side uses **`ring`** for HMAC-SHA256 (the same asm crypto `jsonwebtoken` uses — so
-the crypto is matched, see profiling note). Both are behind the bench-only `bench`
-feature, so the demo stays zero-dep. Representative run (Apple Silicon; ns/op — ratios):
+**Rust, Swift, TypeScript, and Python** also bench an **equivalent classic HS256 JWT**
+with the same claims via that language's *real* JWT library — **Rust `jsonwebtoken`**,
+**Swift `JWTKit`** (Vapor), **TS `jsonwebtoken`**, **Python `PyJWT`** — so the delta
+isolates the *format*. The Rust Dagr side uses **`ring`** for HMAC-SHA256 (the same asm
+crypto `jsonwebtoken` uses, so *that* comparison is crypto-matched); Swift Dagr uses
+**CommonCrypto**. **Mojo** shows two arena-free build strategies: **`reflect`** —
+serialize straight from a live value struct via comptime reflection, no intermediate tree —
+and **`tree`** — a `DirectJson` value tree. Representative run (Apple Silicon; ns/op —
+ratios, not absolutes):
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 365 | **185** | **207** |
-| rust | jwt (`jsonwebtoken`) | 854 | 1472 | 395 |
-| swift | dagr | 5033 | 1859 | 207 |
-| ts | dagr | 4990 | 2190 | 207 |
-| ts | jwt | 1607 | 2092 | 395 |
-| python | dagr | 59682 | 48549 | 207 |
-| python | jwt | 5189 | 4881 | 395 |
-| mojo | dagr | 1488 | 343 | 207 |
-| odin | dagr | 2229 | 281 | 207 |
+| rust | dagr | 459 | **206** | **207** |
+| rust | jwt (`jsonwebtoken`) | 897 | 1492 | 395 |
+| swift | dagr | 3505 | **806** | 207 |
+| swift | jwt (`JWTKit`) | 24977 | 30554 | 368 |
+| ts | dagr | 5074 | 2148 | 207 |
+| ts | jwt (`jsonwebtoken`) | 1700 | 2170 | 395 |
+| python | dagr | 62361 | 49632 | 207 |
+| python | jwt (`PyJWT`) | 5360 | 4934 | 395 |
+| mojo | dagr (reflect) | 1077 | 376 | 207 |
+| mojo | dagr (tree) | 1384 | 376 | 207 |
+| odin | dagr | 2277 | 282 | 207 |
 
-**What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)**
-in every language (schema-driven: field names never hit the wire, no base64 33 %
-inflation). On *speed*, with crypto matched (`ring` both sides), Dagr **verifies ~6×
-faster** than a real `jsonwebtoken` (228 vs 1437 ns) — verify-before-parse + zero-alloc
-lazy read vs base64-decode + full serde deserialize; that's the hot path for a token you
-mint once and check on every request. **Mint is now ~on par** (900 vs 858 ns) after the
-serializer was profiled and rebuilt (see below). In Node/CPython the heavily-optimized
-*native* `JSON`+crypto beats the interpreted Dagr codec outright. Dagr's durable wins are
-**size**, **cross-language byte-identity**, **type-safe reads**, and **fast verify** in
-compiled targets.
+**What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
+every language (schema-driven: field names never hit the wire, no base64 33 % inflation;
+even against JWTKit's leaner 368 B, Dagr is 44 % smaller). On *speed*, the compiled targets' standout
+is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
+deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (206 vs 1492 ns, crypto
+matched); **Swift ~38×** faster than JWTKit (806 vs 30 554 ns — JWTKit is async on
+SwiftCrypto/BoringSSL); **Mojo and Odin** verify in ~300–380 ns. That's the hot path for a
+token you mint once and check on every request. **Mint** is more mixed: Rust Dagr now mints
+*faster* than a real JWT lib (459 vs 897 ns); Mojo's reflection path mints in ~1 µs; Swift
+Dagr mint (~3.5 µs) still trails Rust — its **flat claims serialize in ~450 ns, but the
+recursive-JSON `custom` claim is ~1.9 µs** (Swift value-semantics + ARC over the generic
+`Array`/`indirect enum` store — the next optimization target, see below). In Node/CPython
+the heavily-optimized *native* `JSON`+crypto still beats the interpreted Dagr codec on raw
+speed. Dagr's durable wins are **size**, **cross-language byte-identity**, **type-safe lazy
+reads**, and **fast verify** in compiled targets.
 
 **Profiling** (`dst profile`, Rust, `--features bench`) drove two changes: (1) RustCrypto
 `sha2` ran its *software* backend here — **~4.6× slower than `ring`** (745 vs 160 ns per
@@ -164,19 +173,33 @@ recursive-JSON `Array` variant needlessly boxed each element (`Vec<Option<Box<Js
 a `Vec` already heap-indirects, so it's now `Vec<Option<Json>>`: one fewer alloc per
 element (build ~210 → ~180 ns) and no `Box::new` at call sites.
 
-The same one-builder serialize was applied to the **Swift, TS, and Mojo** direct builders.
-The standout was **Mojo**, which serialized the whole tree *twice* (headerless to sign it,
-then again with the header, plus a value-tree copy) — a single-pass `gate` closure cut its
-mint **~12360 → ~8420 ns**. (Mojo can't drop its `ArcPointer` the way Rust dropped the Box:
-its trait-conformance check rejects a `List` of the still-being-defined type, where Rust's
-`Vec` resolves the recursion.)
+The same one-builder serialize was applied to the **Swift, TS, and Mojo** direct builders
+(Mojo had serialized the whole tree *twice* — headerless to sign, then again with the header —
+which a single-pass `gate` closure fixed, ~12360 → ~8420 ns). Two later passes closed more:
+
+- **Mojo** later dropped `ArcPointer` entirely. The recursive union needs heap indirection to
+  break the `Movable`/`Deinitable` conformance cycle; a generated **non-atomic `_Box`** (an
+  erased untracked pointer + *unconditional* conformance) does it without atomics — where stdlib
+  `OwnedPointer` can't (its deinit is conditional, so the cycle returns). Better still, the
+  **`reflect`** path skips the intermediate tree altogether: `std.reflection` walks a live value
+  struct and emits the union bytes directly (byte-identical, sound by borrow) — mint ~1 µs.
+- **Swift** verify was dominated by **CryptoKit HMAC** (~1.5 µs/op of per-call `SymmetricKey`/
+  `Data` bridging); switching to **CommonCrypto `CCHmac`** (same standard HMAC → byte-identical)
+  cut verify 1859 → ~800 ns. On mint, the packed presence/encoding byte was built with
+  `[Bool].bitSet` — a heap `[Bool]` + `[UInt8]` **per node**; emitting a direct `UInt8` bit-OR
+  removed those allocations (universal across all graphs). What remains is the recursive `custom`
+  JSON: the generic `Array` store's dynamic type-dispatch + `indirect enum` ARC, which would want
+  a codegen-specialized store to close.
 
 **Caveats.** This is deliberately *not* a fair fight (Dagr is a typed binary graph, JWT
 is base64url JSON). Crypto differs *across languages* (Rust = `ring` both sides; Mojo
 implements SHA-256 natively on the **ARMv8 crypto intrinsics** — `sha256h`/`h2`/`su0`/`su1`
-via `llvm_intrinsic`, the same hardware `ring` uses, no FFI; Swift = CryptoKit, TS =
+via `llvm_intrinsic`, the same hardware `ring` uses, no FFI; Swift = CommonCrypto, TS =
 `node:crypto`, Python = `hashlib`, Odin = `core:crypto`), so cross-language `verify` times
-reflect the platform's crypto, not only the format read. (Mojo went further: a streaming
+reflect the platform's crypto, not only the format read. The `jwt` rows likewise aren't
+comparable *to each other* — each is a different library architecture (JWTKit is async on
+SwiftCrypto/BoringSSL, PyJWT is pure Python, `jsonwebtoken` is sync native) — only each to
+its own language's `dagr` row. (Mojo went further: a streaming
 HMAC keeps the SHA state + ipad/opad on the stack (`InlineArray`) and hashes the message
 Span in place — no per-message padding copy, no inner/outer/preimage Lists — the
 generated reader hands the gate a zero-copy `Span` subview of the buffer (not a `List`),
@@ -186,8 +209,8 @@ interleaved, and `update`/`finalize` do their byte handling with `memcpy`/`memse
 stores rather than scalar loops — plus a **lazy header gate** that stopped eagerly restoring
 the header. Together these took Mojo verify **7920 → ~360 ns** (see below).)
 
-**Why Mojo verify trails Rust's, and why that's expected.** Rust's `228 ns` is `ring` —
-world-class hand-tuned **assembly**; Odin's `303 ns` is `core:crypto` — a tuned **stdlib**
+**Why Mojo verify trails Rust's, and why that's expected.** Rust's `~206 ns` is `ring` —
+world-class hand-tuned **assembly**; Odin's `~282 ns` is `core:crypto` — a tuned **stdlib**
 library. Mojo has no mature crypto library, so its SHA-256/HMAC is **hand-rolled from
 scratch**. The honest apples-to-apples: **Rust's own hand-rolled SHA-256 HMAC (the demo's
 zero-dep default, `src/sha256.rs`) benchmarks at `1177 ns`** — so the gap is
