@@ -154,7 +154,7 @@ ratios, not absolutes):
 |---|---|--:|--:|--:|
 | rust | dagr | 451 | **205** | **207** |
 | rust | jwt (`jsonwebtoken`) | 937 | 1519 | 395 |
-| swift | dagr | 3533 | **819** | 207 |
+| swift | dagr | 3317 | **673** | 207 |
 | swift | jwt (`JWTKit`) | 25111 | 30565 | 368 |
 | ts | dagr | 4840 | 2079 | 207 |
 | ts | jwt (`jsonwebtoken`) | 1636 | 2085 | 395 |
@@ -163,12 +163,6 @@ ratios, not absolutes):
 | mojo | dagr (reflect) | 1015 | 360 | 207 |
 | mojo | dagr (tree) | 1355 | 360 | 207 |
 | odin | dagr | 785 | 283 | 207 |
-
-> The `swift dagr` verify row above predates a fix to `hmacValid`'s constant-time compare,
-> which had been indexing `Data` byte-by-byte (~450 ns of every verify, on both platforms —
-> `Data`'s subscript re-resolves its backing on each access). Reading both sides through
-> `withUnsafeBytes` removed it; on Linux that took Swift verify 2389 → 1902 ns. The macOS
-> row has not been re-measured since.
 
 The same harness on **Linux x86-64** (Ryzen AI 9 HX 370, Node 25, Swift 6.3) — a different
 machine *and* different per-language crypto, so read it against itself, not against the table
@@ -199,7 +193,7 @@ every language (schema-driven: field names never hit the wire, no base64 33 % in
 even against JWTKit's leaner 368 B, Dagr is 44 % smaller). On *speed*, the compiled targets' standout
 is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
 deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (205 vs 1519 ns, crypto
-matched); **Swift ~37×** faster than JWTKit (819 vs 30 565 ns — JWTKit is async on
+matched); **Swift ~45×** faster than JWTKit (673 vs 30 565 ns — JWTKit is async on
 SwiftCrypto/BoringSSL); **Python (ctypes→Rust) ~2.7×** faster than PyJWT (2882 vs 7643 ns);
 **Mojo and Odin** verify in ~300–360 ns. That's the hot path for a token you mint once and
 check on every request. **Mint** is more mixed: Rust Dagr now mints *faster* than a real JWT
@@ -238,7 +232,10 @@ which a single-pass `gate` closure fixed, ~12360 → ~8420 ns). Two later passes
   struct and emits the union bytes directly (byte-identical, sound by borrow) — mint ~1 µs.
 - **Swift** verify was dominated by **CryptoKit HMAC** (~1.5 µs/op of per-call `SymmetricKey`/
   `Data` bridging); switching to **CommonCrypto `CCHmac`** (same standard HMAC → byte-identical)
-  cut verify 1859 → ~800 ns. On mint, the packed presence/encoding byte was built with
+  cut verify 1859 → ~800 ns. A later fix to `hmacValid`'s **constant-time compare** — which had
+  been indexing `Data` byte-by-byte (`Data`'s subscript re-resolves its backing on each access,
+  ~450 ns/verify); reading both sides through `withUnsafeBytes` removed it — took macOS verify a
+  further **~800 → ~673 ns** (2389 → 1902 ns on Linux). On mint, the packed presence/encoding byte was built with
   `[Bool].bitSet` — a heap `[Bool]` + `[UInt8]` **per node**; emitting a direct `UInt8` bit-OR
   removed those allocations (universal across all graphs). What remains is the recursive `custom`
   JSON: the generic `Array` store's dynamic type-dispatch + `indirect enum` ARC, which would want
