@@ -193,8 +193,8 @@ every language (schema-driven: field names never hit the wire, no base64 33 % in
 even against JWTKit's leaner 368 B, Dagr is 44 % smaller). On *speed*, the compiled targets' standout
 is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
 deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (205 vs 1519 ns, crypto
-matched); **Swift ~45×** faster than JWTKit (673 vs 30 565 ns — JWTKit is async on
-SwiftCrypto/BoringSSL); **Python (ctypes→Rust) ~2.7×** faster than PyJWT (2882 vs 7643 ns);
+matched); **Swift ~45×** faster than JWTKit (673 vs 30 565 ns — see the decomposition below for
+where JWTKit's 30 µs goes); **Python (ctypes→Rust) ~2.7×** faster than PyJWT (2882 vs 7643 ns);
 **Mojo and Odin** verify in ~300–360 ns. That's the hot path for a token you mint once and
 check on every request. **Mint** is more mixed: Rust Dagr now mints *faster* than a real JWT
 lib (451 vs 937 ns), and Python-over-Rust edges PyJWT (5047 vs 6025 ns); Mojo's reflection
@@ -205,6 +205,25 @@ recursive-JSON `custom` claim is ~1.9 µs** (Swift value-semantics + ARC over th
 heavily-optimized *native* `JSON`+crypto still beats the interpreted TS Dagr codec on raw
 speed. Dagr's durable wins are **size**, **cross-language byte-identity**, **type-safe lazy
 reads**, and **fast verify** in compiled targets.
+
+**Where JWTKit's ~30 µs goes** (the surprise: a *compiled* Swift JWT lib trailing even
+interpreted PyJWT). Decomposing `keys.sign`/`keys.verify` on the same machine (isolate each
+cost, 50k reps):
+
+| component | cost | share of verify |
+|---|--:|--:|
+| HMAC-SHA256 (crypto) | ~1.5 µs | ~5 % |
+| Foundation `Codable` JSON, per encode/decode | ~3.5 µs | ~12 % (verify does header **and** payload) |
+| async / actor `await` (measured *inline*) | **~8 ns** | ~0 % |
+| **remainder** — base64url of 3 segments, `Data` allocs/concats, token split, `JWTKeyCollection` handling | **~20 µs** | **~70 %** |
+
+So it is **not** crypto (~5 %), **not** async (the actor hop is ~8 ns inline — a red herring;
+JWTKit's API being `async` costs nothing here), and only partly JSON (~15–25 %). The bulk is
+**JWTKit's own per-call Foundation object model** — allocation-heavy `Data`/base64 work, top
+to bottom. That is why `jsonwebtoken` (Rust) and PyJWT (thin Python glue over C `json` +
+`hashlib`) win: they do the same job with far fewer allocations, PyJWT's heavy lifting being
+C. The clincher that it is **not** a Swift-language limit: Dagr's *own* Swift row verifies in
+**673 ns** on the same box — the cost is this specific library's model, not the language.
 
 **Profiling** (`dst profile`, Rust, `--features bench`) drove two changes: (1) RustCrypto
 `sha2` ran its *software* backend here — **~4.6× slower than `ring`** (745 vs 160 ns per
@@ -249,8 +268,7 @@ comptime — the **ARMv8 crypto intrinsics** (`sha256h`/`h2`/`su0`/`su1`) or **x
 with a portable scalar core where neither exists; Swift = CommonCrypto on macOS and a
 hand-rolled SHA-256/HMAC elsewhere, TS = `node:crypto`, Odin = `core:crypto`), so cross-language `verify` times
 reflect the platform's crypto, not only the format read. The `jwt` rows likewise aren't
-comparable *to each other* — each is a different library architecture (JWTKit is async on
-SwiftCrypto/BoringSSL, `jsonwebtoken` is sync native) — only each to
+comparable *to each other* — each is a different library architecture — only each to
 its own language's `dagr` row. (Mojo went further: a streaming
 HMAC keeps the SHA state + ipad/opad on the stack (`InlineArray`) and hashes the message
 Span in place — no per-message padding copy, no inner/outer/preimage Lists — the
