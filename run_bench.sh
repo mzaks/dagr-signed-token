@@ -7,9 +7,12 @@
 # real JWT library (jsonwebtoken / JWTKit / jsonwebtoken / PyJWT), same claims, for a
 # size + speed comparison. (Python is a ctypes binding over the Rust cdylib; Swift's JWTKit
 # baseline is a standalone SwiftPM package under examples/swift-jwt-bench — both keep the
-# demo/cross-lang builds zero-dep.) Python additionally benches a standards-based CWT/COSE
-# token (RFC 8392 / RFC 9052 COSE_Mac0, via `pycose`) — the *binary* peer of JWT, where the
-# size story is the honest one: CBOR is already compact, so Dagr lands near parity, not ~48%.
+# demo/cross-lang builds zero-dep.) Rust and Python additionally bench a standards-based
+# CWT/COSE token (RFC 8392 / RFC 9052 COSE_Mac0) — the *binary* peer of JWT, where the size
+# story is the honest one: CBOR is already compact, so Dagr lands near parity, not ~48%.
+# Rust uses a tuned native stack (`coset` + `ciborium` + `ring`, the same HMAC as its Dagr
+# row → a fair efficiency test); Python uses the `pycose` reference library (read its ns/op
+# as a library artifact, its 200 B size as the platform-independent fact).
 #
 # CAVEATS (read before drawing conclusions):
 #  • Not a fair JWT fight, by design — Dagr is a typed binary graph with cross-language
@@ -101,7 +104,8 @@ awk '$3=="dagr"{d[$2]=$6} $3=="jwt" && j==""{j=$6}
 ' "$OUT"
 
 # vs CWT/COSE the gap is different: CBOR is already binary+compact, so Dagr lands near parity
-# (this run's numbers, not a fixed claim). Printed only when the pycose CWT row is present.
+# (this run's numbers, not a fixed claim). Printed when a `cwt` row is present — Rust's
+# `coset` row runs first, so it is the one compared.
 awk '$3=="dagr"{d[$2]=$6} $3=="cwt" && c==""{c=$6}
   END { if (c=="") exit; split(c,cc,"="); for (l in d) { split(d[l],dd,"="); ds=dd[2]; break } cs=cc[2];
         diff=(cs-ds)/cs*100; word=(ds<=cs)?"smaller":"larger"; if (diff<0) diff=-diff;
