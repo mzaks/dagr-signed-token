@@ -141,7 +141,12 @@ lazy verify** (verify-before-parse, then read fields off the buffer, no restore)
 with the same claims via that language's *real* JWT library — **Rust `jsonwebtoken`**,
 **Swift `JWTKit`** (Vapor), **TS `jsonwebtoken`**, **Python `PyJWT`** — so the delta isolates
 the *format*. **Python** here is a `ctypes` binding over the Rust codec
-(`examples/python-ffi`), not an independent implementation. The Rust Dagr side uses **`ring`**
+(`examples/python-ffi`), not an independent implementation. **Rust and Python also bench a
+standards-based CWT/COSE** token — the *binary* peer of JWT (RFC 8392 CWT in a RFC 9052
+`COSE_Mac0`, HMAC-SHA256) — because that, not base64url JSON, is the honest comparison. Rust
+uses a **tuned native** stack (`coset` + `ciborium` + **`ring`**, the same HMAC as its Dagr
+row → a fair *efficiency* test); Python uses the **`pycose`** reference library (size-only —
+see the CWT note under the table). The Rust Dagr side uses **`ring`**
 for HMAC-SHA256 (the same asm crypto `jsonwebtoken` uses, so *that* comparison is
 crypto-matched); Swift Dagr uses **CommonCrypto** on macOS and a hand-rolled
 SHA-256/HMAC where CommonCrypto is absent (Linux), which costs it ~1.2 µs/op. **Mojo** shows two arena-free build
@@ -154,15 +159,42 @@ ratios, not absolutes):
 |---|---|--:|--:|--:|
 | rust | dagr | 451 | **205** | **207** |
 | rust | jwt (`jsonwebtoken`) | 937 | 1519 | 395 |
+| rust | cwt (`coset`) | 1360 | 1980 | **200** |
 | swift | dagr | 3317 | **673** | 207 |
 | swift | jwt (`JWTKit`) | 25111 | 30565 | 368 |
 | ts | dagr | 4840 | 2079 | 207 |
 | ts | jwt (`jsonwebtoken`) | 1636 | 2085 | 395 |
 | python | dagr (`ctypes`→Rust) | 5047 | 2882 | 207 |
 | python | jwt (`PyJWT`) | 6025 | 7643 | 365 |
+| python | cwt (`pycose`) | 23165 | 11100 | **200** |
 | mojo | dagr (reflect) | 1015 | 360 | 207 |
 | mojo | dagr (tree) | 1355 | 360 | 207 |
 | odin | dagr | 785 | 283 | 207 |
+
+The **`cwt`** rows are the load-bearing comparison — CWT/COSE (RFC 8392 / RFC 9052 `COSE_Mac0`,
+HMAC-SHA256) is the *binary* peer of JWT, so this, not base64url JSON, is the honest test.
+Two takeaways:
+
+- **Size is ~parity.** A standards-exact CWT of the same claims is **200 B** — a hair *under*
+  Dagr's 207 B. Against CBOR, Dagr's ~48 % size win over JSON JWT collapses to roughly nothing
+  (CBOR already gives integer claim keys and no base64 inflation). Size is where JWT loses to
+  both; it is *not* where Dagr beats CWT.
+- **Speed is where Dagr wins.** The `rust cwt` row is a **tuned native** stack — `coset`
+  (RustCrypto COSE) + `ciborium` + **`ring`**, the *same* HMAC crate as the Dagr row — so it is
+  a fair format-vs-format efficiency test at matched crypto. Dagr mints **~3× faster** (451 vs
+  1360 ns) and verifies **~10× faster** (205 vs 1980 ns). The verify gap is the real story:
+  Dagr's **verify-before-parse + zero-alloc lazy read** touches only `algorithm`/`signature`/
+  `exp`/`aud`, while the COSE path parses the whole envelope and CBOR-decodes the entire claims
+  map into an owned tree before it can check anything. A hand-rolled partial CBOR scan would
+  narrow that gap — but *that is the point*: Dagr's lazy typed read falls out of the schema for
+  free, whereas with CWT you would hand-write it. (The `python cwt` row uses **`pycose`**, a
+  *reference* implementation — a Python object per COSE element — so read its ns/op as a library
+  artifact, not a format signal; its **size**, 200 B, is the platform-independent fact.)
+
+Dagr's other durable edges over CWT/COSE: **generator-guaranteed cross-language byte-identity**
+(no COSE canonicalization footgun) and **typed field access**. What CWT/COSE has and this token
+does not: an IETF standard, asymmetric algorithms, and — since alg lives in the COSE *protected*
+header — an algorithm identifier bound *into* the MAC (this token pins HS256 by policy instead).
 
 The same harness on **Linux x86-64** (Ryzen AI 9 HX 370, Node 25, Swift 6.3) — a different
 machine *and* different per-language crypto, so read it against itself, not against the table
@@ -172,17 +204,21 @@ above:
 |---|---|--:|--:|--:|
 | rust | dagr | 455 | **290** | **207** |
 | rust | jwt (`jsonwebtoken`) | 762 | 1612 | 395 |
+| rust | cwt (`coset`) | — | — | **200** |
 | swift | dagr | 4118 | 1902 | 207 |
 | swift | jwt (`JWTKit`) | 20866 | 26448 | 368 |
 | ts | dagr | 12880 | 3100 | 207 |
 | ts | jwt (`jsonwebtoken`) | 2606 | 3280 | 395 |
 | python | dagr (`ctypes`→Rust) | 5620 | 4204 | 207 |
 | python | jwt (`PyJWT`) | 6495 | 8206 | 365 |
+| python | cwt (`pycose`) | — | — | **200** |
 | mojo | dagr (reflect) | 635 | 458 | 207 |
 | mojo | dagr (tree) | 829 | 458 | 207 |
 | odin | dagr | 899 | 316 | 207 |
 
-Sizes are identical, as they must be. Two rows move for platform reasons rather than format
+Sizes are identical, as they must be (the `cwt` rows are **200 B** here too — CBOR encoding is
+deterministic, so their size is platform-independent; the `coset`/`pycose` speeds were only
+measured on the Apple Silicon box above, hence the `—`). Two rows move for platform reasons rather than format
 reasons: **Swift** verify is the hand-rolled HMAC standing in for CommonCrypto (its SHA-256
 compression is ~240 ns/block against CommonCrypto's asm), and **Mojo** verify (360 → 458 ns)
 is SHA-NI in place of the ARMv8 crypto extensions. **TS** mint is ~2.6× slower on this box —
@@ -190,7 +226,10 @@ a Node/JIT difference, not a codec change.
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
 every language (schema-driven: field names never hit the wire, no base64 33 % inflation;
-even against JWTKit's leaner 368 B, Dagr is 44 % smaller). On *speed*, the compiled targets' standout
+even against JWTKit's leaner 368 B, Dagr is 44 % smaller). That win is against *JSON*; against
+the *binary* peer **CWT/COSE the size is ~parity** (200 vs 207 B), and Dagr's edge moves to
+*speed* — vs a tuned native COSE stack (`coset`+`ring`) it mints ~3× and verifies ~10× faster
+at matched crypto (see the CWT note under the first table), plus byte-identity and typed reads. On *speed*, the compiled targets' standout
 is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
 deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (205 vs 1519 ns, crypto
 matched); **Swift ~45×** faster than JWTKit (673 vs 30 565 ns — see the decomposition below for

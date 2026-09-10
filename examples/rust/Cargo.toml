@@ -17,10 +17,14 @@ dagr_signed_token = { path = "../../gen/rust" }
 jsonwebtoken = { version = "9", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 ring = { version = "0.17", optional = true }
+# CWT/COSE baseline — the *binary* peer of JWT (RFC 8392 / RFC 9052), so the efficiency
+# comparison is format-vs-format at parity crypto (`ring`, same as the Dagr row). Bench-only.
+coset = { version = "0.3", optional = true }
+ciborium = { version = "0.2", optional = true }
 
 [features]
 real-crypto = ["dep:ring"]
-bench = ["real-crypto", "dep:jsonwebtoken", "dep:serde"]
+bench = ["real-crypto", "dep:jsonwebtoken", "dep:serde", "dep:coset", "dep:ciborium"]
 
 [[bin]]
 name = "dst"

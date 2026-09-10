@@ -9,6 +9,8 @@
 mod sha256;
 #[cfg(feature = "bench")]
 mod jwt;
+#[cfg(feature = "bench")]
+mod cwt;
 
 use dagr_signed_token::dagr_runtime::DagrError;
 use dagr_signed_token::token::{Json, Jws, TokenArena, TokenGraph};
@@ -198,13 +200,19 @@ fn bench() {
     let tok = mint_direct(SECRET, "HS256", EXP);
     // JWT: jsonwebtoken validates exp against the real wall clock, so mint valid at now+1h.
     let jtok = jwt::jwt_mint(SECRET, jwt::now() + 3600);
-    // Correctness gate: both accept the valid token and reject expired/tampered.
+    // CWT/COSE: our verify takes `now` explicitly, so keep the fixed demo timestamps.
+    let ctok = cwt::cwt_mint(SECRET, NOW, EXP);
+    // Correctness gate: all three accept the valid token and reject expired/tampered.
     assert!(verify(&tok, SECRET, NOW).is_ok() && jwt::jwt_verify(&jtok, SECRET).is_ok());
+    assert!(cwt::cwt_verify(&ctok, SECRET, NOW).is_ok());
     assert_eq!(tok, mint(SECRET, "HS256", EXP), "direct build must be byte-identical to arena");
     assert!(verify(&mint_direct(SECRET, "HS256", NOW - 1), SECRET, NOW).is_err());
     assert!(jwt::jwt_verify(&jwt::jwt_mint(SECRET, jwt::now() - 3600), SECRET).is_err());  // expired (past 60s leeway)
     let mut bad = jtok.clone(); let mid = bad.len() / 2; bad[mid] ^= 1;                  // tampered
     assert!(jwt::jwt_verify(&bad, SECRET).is_err());
+    assert!(cwt::cwt_verify(&cwt::cwt_mint(SECRET, NOW, NOW - 1), SECRET, NOW).is_err()); // expired
+    let mut cbad = ctok.clone(); *cbad.last_mut().unwrap() ^= 1;                          // tampered (MAC tag)
+    assert!(cwt::cwt_verify(&cbad, SECRET, NOW).is_err());
 
     let dm = time_ns(n, || { std::hint::black_box(mint_direct(SECRET, "HS256", EXP)); });
     let dv = time_ns(n, || { std::hint::black_box(verify(std::hint::black_box(&tok), SECRET, NOW).is_ok()); });
@@ -214,6 +222,11 @@ fn bench() {
     let jm = time_ns(n, || { std::hint::black_box(jwt::jwt_mint(SECRET, jexp)); });
     let jv = time_ns(n, || { std::hint::black_box(jwt::jwt_verify(std::hint::black_box(&jtok), SECRET).is_ok()); });
     println!("BENCH rust jwt mint={jm} verify={jv} size={}", jtok.len());
+
+    // CWT/COSE — tuned native codec (`coset`+`ciborium`+`ring`), same crypto as the Dagr row.
+    let cm = time_ns(n, || { std::hint::black_box(cwt::cwt_mint(SECRET, NOW, EXP)); });
+    let cv = time_ns(n, || { std::hint::black_box(cwt::cwt_verify(std::hint::black_box(&ctok), SECRET, NOW).is_ok()); });
+    println!("BENCH rust cwt mint={cm} verify={cv} size={}", ctok.len());
 }
 
 // Break `mint_direct` into phases — build the value tree, serialize it (no HMAC), and

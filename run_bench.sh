@@ -7,7 +7,9 @@
 # real JWT library (jsonwebtoken / JWTKit / jsonwebtoken / PyJWT), same claims, for a
 # size + speed comparison. (Python is a ctypes binding over the Rust cdylib; Swift's JWTKit
 # baseline is a standalone SwiftPM package under examples/swift-jwt-bench — both keep the
-# demo/cross-lang builds zero-dep.)
+# demo/cross-lang builds zero-dep.) Python additionally benches a standards-based CWT/COSE
+# token (RFC 8392 / RFC 9052 COSE_Mac0, via `pycose`) — the *binary* peer of JWT, where the
+# size story is the honest one: CBOR is already compact, so Dagr lands near parity, not ~48%.
 #
 # CAVEATS (read before drawing conclusions):
 #  • Not a fair JWT fight, by design — Dagr is a typed binary graph with cross-language
@@ -58,14 +60,18 @@ PYFFI=(python3 examples/python-ffi/bench.py)
 PYVENV="$ROOT/examples/python-ffi/.bench-venv"
 [ -x "$PYVENV/bin/python" ] || python3 -m venv "$PYVENV" >/dev/null 2>&1 || true
 if [ -x "$PYVENV/bin/python" ]; then
+  # PyJWT = classic-JWT baseline; pycose (+cbor2<6, whose 6.x decodes tag values as tuples
+  # that pycose 1.1.0 rejects) = the standards-based CWT/COSE peer. Both best-effort.
   "$PYVENV/bin/python" -c "import jwt" 2>/dev/null || "$PYVENV/bin/pip" install -q pyjwt >/dev/null 2>&1 || true
-  "$PYVENV/bin/python" -c "import jwt" 2>/dev/null && PYFFI=("$PYVENV/bin/python" examples/python-ffi/bench.py)
+  "$PYVENV/bin/python" -c "import pycose, cbor2" 2>/dev/null || "$PYVENV/bin/pip" install -q pycose 'cbor2<6' >/dev/null 2>&1 || true
+  "$PYVENV/bin/python" -c "import jwt" 2>/dev/null || "$PYVENV/bin/python" -c "import pycose" 2>/dev/null \
+    && PYFFI=("$PYVENV/bin/python" examples/python-ffi/bench.py)
 fi
 
 bench_rust()   { "${RUST[@]}"   bench; }
 bench_swift()  { "${SWIFT[@]}"  bench; "${SWIFT_JWT[@]}"; }   # dagr + JWTKit baseline
 bench_ts()     { "${TS[@]}"     bench; }
-bench_python() { "${PYFFI[@]}"; }                            # dagr (ctypes→Rust) + PyJWT baseline
+bench_python() { "${PYFFI[@]}"; }                            # dagr (ctypes→Rust) + PyJWT + CWT/COSE baselines
 bench_mojo()   { "${MOJO[@]}"   bench; }
 bench_odin()   { "${ODIN[@]}"   bench; }
 
@@ -92,6 +98,14 @@ echo "== [size] Dagr vs classic JWT =="
 awk '$3=="dagr"{d[$2]=$6} $3=="jwt" && j==""{j=$6}
   END { split(j,jj,"="); for (l in d) { split(d[l],dd,"="); ds=dd[2]; js=jj[2]; break }
         printf "  Dagr token: %d B   |   classic JWT: %d B   →  Dagr is %.0f%% smaller\n", ds, js, (1-ds/js)*100 }
+' "$OUT"
+
+# vs CWT/COSE the gap is different: CBOR is already binary+compact, so Dagr lands near parity
+# (this run's numbers, not a fixed claim). Printed only when the pycose CWT row is present.
+awk '$3=="dagr"{d[$2]=$6} $3=="cwt" && c==""{c=$6}
+  END { if (c=="") exit; split(c,cc,"="); for (l in d) { split(d[l],dd,"="); ds=dd[2]; break } cs=cc[2];
+        diff=(cs-ds)/cs*100; word=(ds<=cs)?"smaller":"larger"; if (diff<0) diff=-diff;
+        printf "  Dagr token: %d B   |   CWT/COSE (COSE_Mac0, HS256): %d B   →  Dagr is %.0f%% %s\n", ds, cs, diff, word }
 ' "$OUT"
 
 echo
