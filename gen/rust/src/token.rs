@@ -7,6 +7,8 @@ use std::hash::Hash;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeRef { pub index: u32 }
 
+pub use crate::token_core::*;
+
 #[derive(Debug, Clone)]
 pub enum _Json {
     String(String),
@@ -95,15 +97,15 @@ impl<'arena, G: TokenGraph> fmt::Display for Json<'arena, G> {
     }
 }
 
-fn _union_to_public_json<'arena, G: TokenGraph>(stor: _Json, graph: &'arena G) -> Option<Json<'arena, G>> {
+fn _union_raw_public_json<'arena, G: TokenGraph>(stor: _Json, graph: &'arena G) -> Json<'arena, G> {
     match stor {
-        _Json::String(v) => Some(Json::String(v)),
-        _Json::Number(v) => Some(Json::Number(v)),
-        _Json::Bool(v) => Some(Json::Bool(v)),
-        _Json::Array(v) => Some(Json::Array(v.into_iter().map(|o| o.and_then(|e| _union_to_public_json(e, graph))).collect())),
-        _Json::Object(v) => Some(Json::Object(v.into_iter().map(|nr| JsonMember { index: nr.index, graph: graph }).collect())),
-        _Json::Data(v) => Some(Json::Data(v)),
-        _Json::Unknown(id) => Some(Json::Unknown(id)),
+        _Json::String(v) => Json::String(v),
+        _Json::Number(v) => Json::Number(v),
+        _Json::Bool(v) => Json::Bool(v),
+        _Json::Array(v) => Json::Array(v.into_iter().map(|o| o.map(|e| _union_raw_public_json(e, graph))).collect()),
+        _Json::Object(v) => Json::Object(v.into_iter().map(|nr| JsonMember { index: nr.index, graph: graph }).collect()),
+        _Json::Data(v) => Json::Data(v),
+        _Json::Unknown(id) => Json::Unknown(id),
     }
 }
 
@@ -233,7 +235,7 @@ impl<'arena, G: TokenGraph> Claims<'arena, G> {
             arena.get(self.index as usize)
                 .and_then(|v| v.custom.clone())
         };
-        stor.and_then(|s| _union_to_public_json(s, self.graph))
+        stor.map(|s| _union_raw_public_json(s, self.graph))
     }
     pub fn set_custom(&self, v: Option<Json<'_, G>>) {
         let stor = v.map(|u| u._to_storage(self.graph));
@@ -334,7 +336,7 @@ impl<'arena, G: TokenGraph> JsonMember<'arena, G> {
             arena.get(self.index as usize)
                 .and_then(|v| v.value.clone())
         };
-        stor.and_then(|s| _union_to_public_json(s, self.graph))
+        stor.map(|s| _union_raw_public_json(s, self.graph))
     }
     pub fn set_value(&self, v: Option<Json<'_, G>>) {
         let stor = v.map(|u| u._to_storage(self.graph));
@@ -467,7 +469,7 @@ fn _store_union_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilder) -> 
         },
         Json::Object(v) => {
             let mut _items = b.take_ref_scratch();
-            _items.extend(v.iter().rev().map(|n| n.store(b).unwrap_or(NodeStoreRef::Offset(0))));
+            _items.extend(v.iter().rev().filter_map(|n| n.store(b).ok()));
             let _c = b.store_node_ref_array(&_items, b.cursor());
             b.return_ref_scratch(_items);
             b.store_forward_pointer(_c);
@@ -505,7 +507,7 @@ fn _store_union_field_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilde
         },
         Json::Object(v) => {
             let mut _items = b.take_ref_scratch();
-            _items.extend(v.iter().rev().map(|n| n.store(b).unwrap_or(NodeStoreRef::Offset(0))));
+            _items.extend(v.iter().rev().filter_map(|n| n.store(b).ok()));
             let _c = b.store_node_ref_array(&_items, b.cursor());
             b.return_ref_scratch(_items);
             let _bef = b.cursor();
@@ -538,7 +540,7 @@ fn _apply_union_field_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilde
         },
         Json::Object(v) => {
             let mut _items = b.take_ref_scratch();
-            _items.extend(v.iter().rev().map(|n| n.store(b).unwrap_or(NodeStoreRef::Offset(0))));
+            _items.extend(v.iter().rev().filter_map(|n| n.store(b).ok()));
             let _c = b.store_node_ref_array(&_items, b.cursor());
             b.return_ref_scratch(_items);
             UnionApplied::FwdPtr(4u64, _c)
@@ -563,7 +565,7 @@ fn _store_union_arr_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilder)
         },
         Json::Object(v) => {
             let mut _items = b.take_ref_scratch();
-            _items.extend(v.iter().rev().map(|n| n.store(b).unwrap_or(NodeStoreRef::Offset(0))));
+            _items.extend(v.iter().rev().filter_map(|n| n.store(b).ok()));
             let _c = b.store_node_ref_array(&_items, b.cursor());
             b.return_ref_scratch(_items);
             UnionArrSlot::FwdPtr(4u8, _c)
@@ -576,7 +578,7 @@ fn _store_union_arr_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilder)
 fn _supp_json<'a, G: TokenGraph>(u: Json<'a, G>, b: &mut DagrBuilder) -> Result<(u64, u64), DagrError> {
     let (_tid, _code): (u64, u64) = match u {
         Json::String(v) => { let _bs = v.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); (0u64, 6u64) },
-        Json::Number(v) => { b.store_always_packed_f64(v); (1u64, 5u64) },
+        Json::Number(v) => { if b.store_packed_f64(v) { (1u64, 5u64) } else { (1u64, 4u64) } },
         Json::Bool(v) => { b.store_bool(v); (2u64, 1u64) },
         Json::Array(v) => {
                 let _uav_arr = v;
@@ -671,7 +673,7 @@ impl<'arena, G: TokenGraph> Claims<'arena, G> {
         if let Some(_u_custom) = self.custom() {
             let (_tid_custom, _code_custom): (u64, u64) = match _u_custom {
                 Json::String(v) => { let _bs = v.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); (0u64, 6u64) },
-                Json::Number(v) => { b.store_always_packed_f64(v); (1u64, 5u64) },
+                Json::Number(v) => { if b.store_packed_f64(v) { (1u64, 5u64) } else { (1u64, 4u64) } },
                 Json::Bool(v) => { b.store_bool(v); (2u64, 1u64) },
                 Json::Array(v) => {
                 let _uav_arr = v;
@@ -772,7 +774,7 @@ impl<'arena, G: TokenGraph> JsonMember<'arena, G> {
         if let Some(_u_value) = self.value() {
             let (_tid_value, _code_value): (u64, u64) = match _u_value {
                 Json::String(v) => { let _bs = v.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); (0u64, 6u64) },
-                Json::Number(v) => { b.store_always_packed_f64(v); (1u64, 5u64) },
+                Json::Number(v) => { if b.store_packed_f64(v) { (1u64, 5u64) } else { (1u64, 4u64) } },
                 Json::Bool(v) => { b.store_bool(v); (2u64, 1u64) },
                 Json::Array(v) => {
                 let _uav_arr = v;
@@ -829,37 +831,22 @@ impl<'arena, G: TokenGraph> JsonMember<'arena, G> {
     }
 }
 
-fn _restore_union_noderef_json<'arena, G: TokenGraph>(
-    data: &'arena [u8], at: usize, tid: u8, _arena: &'arena G,
-    _cache: &mut std::collections::HashMap<(u64, usize), u32>,
-) -> Result<Json<'arena, G>, DagrError> {
-    match tid {
-        0 => Ok(Json::String(crate::dagr_runtime::read_string(data, at)?)),
-        1 => Ok(Json::Number(crate::dagr_runtime::read_f64(data, at)? as f64)),
-        2 => Ok(Json::Bool(crate::dagr_runtime::read_bool(data, at)?)),
-        3 => Err(DagrError::InvalidData),  // unsupported variant arrayWithOptionals
-        4 => Err(DagrError::InvalidData),  // unsupported variant array
-        5 => Ok(Json::Data(crate::dagr_runtime::read_blob(data, at)?)),
-        id => Ok(Json::Unknown(id)),
-    }
-}
-
 fn _restore_union_arr_json<'arena, G: TokenGraph>(data: &'arena [u8], at: usize, arena: &'arena G,
-    cache: &mut std::collections::HashMap<(u64, usize), u32>) -> Result<Vec<Json<'arena, G>>, DagrError> {
+    cache: &mut crate::dagr_runtime::RestoreCache) -> Result<Vec<Json<'arena, G>>, DagrError> {
     let (_slots, _base) = dagr_runtime::read_union_array(data, at, 4)?;
     _slots.into_iter().map(|(_tid, _raw)| -> Result<Json<'arena, G>, DagrError> { Ok(match _tid {
         0u8 => Json::String(dagr_runtime::read_string(data, _base + _raw as usize)?),
         1u8 => Json::Number(f64::from_bits(_raw)),
         2u8 => Json::Bool(_raw != 0),
         3u8 => { let _p = _base + _raw as usize; Json::Array(_restore_union_arr_opt_json(data, _p, arena, cache)?) },
-        4u8 => { let _p = _base + _raw as usize; let _refs = crate::dagr_runtime::read_node_ref_array(data, _p)?; let mut _out = Vec::new(); for _r in _refs { if let Some(_o) = _r { _out.push(_restore_json_member(data, _o, arena, cache)?); } } Json::Object(_out) },
+        4u8 => { let _p = _base + _raw as usize; let _refs = crate::dagr_runtime::read_node_ref_array(data, _p)?; let mut _out = Vec::new(); for _r in _refs { if let Some(_o) = _r { _out.push(_restore_ref_json_member(data, _o, arena, cache)?); } } Json::Object(_out) },
         5u8 => Json::Data(dagr_runtime::read_blob(data, _base + _raw as usize)?),
         _id => Json::Unknown(_id),
     }) }).collect()
 }
 
 fn _restore_union_arr_opt_json<'arena, G: TokenGraph>(data: &'arena [u8], at: usize, arena: &'arena G,
-    cache: &mut std::collections::HashMap<(u64, usize), u32>) -> Result<Vec<Option<Json<'arena, G>>>, DagrError> {
+    cache: &mut crate::dagr_runtime::RestoreCache) -> Result<Vec<Option<Json<'arena, G>>>, DagrError> {
     let (_slots, _base) = dagr_runtime::read_union_optional_array(data, at, 4)?;
     _slots.into_iter().map(|_slot_opt| -> Result<Option<Json<'arena, G>>, DagrError> { match _slot_opt {
         None => Ok(None),
@@ -868,7 +855,7 @@ fn _restore_union_arr_opt_json<'arena, G: TokenGraph>(data: &'arena [u8], at: us
             1u8 => Json::Number(f64::from_bits(_raw)),
             2u8 => Json::Bool(_raw != 0),
             3u8 => { let _p = _base + _raw as usize; Json::Array(_restore_union_arr_opt_json(data, _p, arena, cache)?) },
-            4u8 => { let _p = _base + _raw as usize; let _refs = crate::dagr_runtime::read_node_ref_array(data, _p)?; let mut _out = Vec::new(); for _r in _refs { if let Some(_o) = _r { _out.push(_restore_json_member(data, _o, arena, cache)?); } } Json::Object(_out) },
+            4u8 => { let _p = _base + _raw as usize; let _refs = crate::dagr_runtime::read_node_ref_array(data, _p)?; let mut _out = Vec::new(); for _r in _refs { if let Some(_o) = _r { _out.push(_restore_ref_json_member(data, _o, arena, cache)?); } } Json::Object(_out) },
             5u8 => Json::Data(dagr_runtime::read_blob(data, _base + _raw as usize)?),
             _id => Json::Unknown(_id),
         })),
@@ -877,8 +864,10 @@ fn _restore_union_arr_opt_json<'arena, G: TokenGraph>(data: &'arena [u8], at: us
 
 fn _restore_union_noderef_vtable_json<'arena, G: TokenGraph>(
     data: &'arena [u8], at: usize, tid: u8, arena: &'arena G,
-    cache: &mut std::collections::HashMap<(u64, usize), u32>,
+    cache: &mut crate::dagr_runtime::RestoreCache,
 ) -> Result<Json<'arena, G>, DagrError> {
+    crate::dagr_runtime::depth_enter(cache)?;
+    let _depth_r = (|| -> Result<Json<'arena, G>, DagrError> {
     match tid {
         0 => { let _p = crate::dagr_runtime::read_forward_pointer(data, at)?; Ok(Json::String(crate::dagr_runtime::read_string(data, _p)?)) },
         1 => Ok(Json::Number(crate::dagr_runtime::read_f64(data, at)? as f64)),
@@ -891,24 +880,29 @@ fn _restore_union_noderef_vtable_json<'arena, G: TokenGraph>(
             let _p = crate::dagr_runtime::read_forward_pointer(data, at)?;
             let _refs = crate::dagr_runtime::read_node_ref_array(data, _p)?;
             let mut _out = Vec::new();
-            for _r in _refs { if let Some(_o) = _r { _out.push(_restore_json_member(data, _o, arena, cache)?); } }
+            for _r in _refs { if let Some(_o) = _r { _out.push(_restore_ref_json_member(data, _o, arena, cache)?); } }
             Ok(Json::Object(_out))
         }
         5 => { let _p = crate::dagr_runtime::read_forward_pointer(data, at)?; Ok(Json::Data(crate::dagr_runtime::read_blob(data, _p)?)) },
         id => Ok(Json::Unknown(id)),
     }
+    })();
+    crate::dagr_runtime::depth_leave(cache);
+    _depth_r
 }
 
 fn _rpup_json<'arena, G: TokenGraph>(
     data: &'arena [u8], mut _pos: usize, _utid: u8, _ucode: u8,
-    arena: &'arena G, cache: &mut std::collections::HashMap<(u64, usize), u32>,
+    arena: &'arena G, cache: &mut crate::dagr_runtime::RestoreCache,
 ) -> Result<(Json<'arena, G>, usize), DagrError> {
+    crate::dagr_runtime::depth_enter(cache)?;
+    let _depth_r = (|| -> Result<(Json<'arena, G>, usize), DagrError> {
     let _ = (&arena, &cache);
     let mut _uo: Vec<Json<'arena, G>> = Vec::with_capacity(1);
     match _utid {
         0 => {
             let (_sl_0, _sb_0) = crate::dagr_runtime::read_leb(data, _pos)?;
-            let _ss_0 = String::from_utf8_lossy(data.get(_pos+_sb_0.._pos+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).into_owned();
+            let _ss_0 = crate::dagr_runtime::str_from(data.get(_pos+_sb_0.._pos+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
             _uo.push(Json::String(_ss_0));
             _pos += _sb_0 + _sl_0 as usize;
         }
@@ -970,12 +964,17 @@ fn _rpup_json<'arena, G: TokenGraph>(
         _ => return Err(DagrError::InvalidData),
     }
     Ok((_uo.pop().ok_or(DagrError::InvalidData)?, _pos))
+    })();
+    crate::dagr_runtime::depth_leave(cache);
+    _depth_r
 }
 
 fn _restore_claims<'arena, G: TokenGraph>(
     data: &'arena [u8], at: usize, arena: &'arena G,
-    cache: &mut std::collections::HashMap<(u64, usize), u32>,
+    cache: &mut crate::dagr_runtime::RestoreCache,
 ) -> Result<Claims<'arena, G>, DagrError> {
+    crate::dagr_runtime::depth_enter(cache)?;
+    let _depth_r = (|| -> Result<Claims<'arena, G>, DagrError> {
     if at >= data.len() { return Err(DagrError::InvalidData); }
     let _cache_key = (G::CLAIMS_TYPE_ID, at);
     if let Some(&idx) = cache.get(&_cache_key) {
@@ -999,21 +998,21 @@ fn _restore_claims<'arena, G: TokenGraph>(
     let _subject_val = if _obs0 & 1 != 0 {
         let (_sv_subject, _slb_subject) = crate::dagr_runtime::read_leb(data, _cur)?;
         _cur += _slb_subject;
-        let _s_subject = String::from_utf8_lossy(data.get(_cur.._cur + _sv_subject as usize).ok_or(DagrError::InvalidData)?).into_owned();
+        let _s_subject = crate::dagr_runtime::str_from(data.get(_cur.._cur + _sv_subject as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
         _cur += _sv_subject as usize;
         Some(_s_subject)
     } else { None };
     let _issuer_val = if _obs0 & 2 != 0 {
         let (_sv_issuer, _slb_issuer) = crate::dagr_runtime::read_leb(data, _cur)?;
         _cur += _slb_issuer;
-        let _s_issuer = String::from_utf8_lossy(data.get(_cur.._cur + _sv_issuer as usize).ok_or(DagrError::InvalidData)?).into_owned();
+        let _s_issuer = crate::dagr_runtime::str_from(data.get(_cur.._cur + _sv_issuer as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
         _cur += _sv_issuer as usize;
         Some(_s_issuer)
     } else { None };
     let _audience_val = if _obs0 & 4 != 0 {
         let (_sv_audience, _slb_audience) = crate::dagr_runtime::read_leb(data, _cur)?;
         _cur += _slb_audience;
-        let _s_audience = String::from_utf8_lossy(data.get(_cur.._cur + _sv_audience as usize).ok_or(DagrError::InvalidData)?).into_owned();
+        let _s_audience = crate::dagr_runtime::str_from(data.get(_cur.._cur + _sv_audience as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
         _cur += _sv_audience as usize;
         Some(_s_audience)
     } else { None };
@@ -1049,7 +1048,7 @@ fn _restore_claims<'arena, G: TokenGraph>(
         match _type_custom {
             0 => {
                 let (_sl_0, _sb_0) = crate::dagr_runtime::read_leb(data, _evp_custom)?;
-                let _ss_0 = String::from_utf8_lossy(data.get(_evp_custom+_sb_0.._evp_custom+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).into_owned();
+                let _ss_0 = crate::dagr_runtime::str_from(data.get(_evp_custom+_sb_0.._evp_custom+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
                 _tmp_custom.push(Some(Json::String(_ss_0)));
                 _evp_custom += _sb_0 + _sl_0 as usize;
             }
@@ -1120,12 +1119,17 @@ fn _restore_claims<'arena, G: TokenGraph>(
     _node.set_scopes(_scopes_val);
     _node.set_custom(_custom_val);
     Ok(_node)
+    })();
+    crate::dagr_runtime::depth_leave(cache);
+    _depth_r
 }
 
 fn _restore_json_member<'arena, G: TokenGraph>(
     data: &'arena [u8], at: usize, arena: &'arena G,
-    cache: &mut std::collections::HashMap<(u64, usize), u32>,
+    cache: &mut crate::dagr_runtime::RestoreCache,
 ) -> Result<JsonMember<'arena, G>, DagrError> {
+    crate::dagr_runtime::depth_enter(cache)?;
+    let _depth_r = (|| -> Result<JsonMember<'arena, G>, DagrError> {
     if at >= data.len() { return Err(DagrError::InvalidData); }
     let _cache_key = (G::JSONMEMBER_TYPE_ID, at);
     if let Some(&idx) = cache.get(&_cache_key) {
@@ -1148,7 +1152,7 @@ fn _restore_json_member<'arena, G: TokenGraph>(
     let _key_val = if _cur < data.len() {
         let (_sv_key, _slb_key) = crate::dagr_runtime::read_leb(data, _cur)?;
         _cur += _slb_key;
-        let _s_key = String::from_utf8_lossy(data.get(_cur.._cur + _sv_key as usize).ok_or(DagrError::InvalidData)?).into_owned();
+        let _s_key = crate::dagr_runtime::str_from(data.get(_cur.._cur + _sv_key as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
         _cur += _sv_key as usize;
         Some(_s_key)
     } else { None };
@@ -1162,7 +1166,7 @@ fn _restore_json_member<'arena, G: TokenGraph>(
         match _type_value {
             0 => {
                 let (_sl_0, _sb_0) = crate::dagr_runtime::read_leb(data, _evp_value)?;
-                let _ss_0 = String::from_utf8_lossy(data.get(_evp_value+_sb_0.._evp_value+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).into_owned();
+                let _ss_0 = crate::dagr_runtime::str_from(data.get(_evp_value+_sb_0.._evp_value+_sb_0+_sl_0 as usize).ok_or(DagrError::InvalidData)?).ok_or(DagrError::InvalidUtf8)?.to_owned();
                 _tmp_value.push(Some(Json::String(_ss_0)));
                 _evp_value += _sb_0 + _sl_0 as usize;
             }
@@ -1228,58 +1232,22 @@ fn _restore_json_member<'arena, G: TokenGraph>(
     _node.set_key(_key_val.as_deref());
     _node.set_value(_value_val);
     Ok(_node)
+    })();
+    crate::dagr_runtime::depth_leave(cache);
+    _depth_r
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Jws {
-    pub algorithm: String,
-    pub key_id: Option<String>,
-    pub signature: Vec<u8>,
-}
-
-impl Jws {
-    pub fn store_packed(&self, b: &mut crate::dagr_runtime::DagrBuilder) {
-        let _before = b.cursor();
-        { let _bs: &[u8] = self.signature.as_slice(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); b.store_leb((2u64 << 1) | 1); }
-        if let Some(ref _v) = self.key_id {
-            { let _bs = _v.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); b.store_leb((1u64 << 1) | 1); }
-        }
-        { let _bs = self.algorithm.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); b.store_leb((0u64 << 1) | 1); }
-        b.store_leb((b.cursor() - _before) as u64);
+#[allow(dead_code)]
+fn _drain_pending<'arena, G: TokenGraph>(
+    data: &'arena [u8], arena: &'arena G, cache: &mut crate::dagr_runtime::RestoreCache,
+) -> Result<(), DagrError> {
+    let _ = (data, arena);
+    while let Some((_tid, _at, _idx)) = cache.pending.pop() {
+        let _saved = cache.depth();
+        cache.set_depth(0);
+        cache.set_depth(_saved);
     }
-
-    pub fn restore(data: &[u8], at: usize) -> Self {
-        use crate::dagr_runtime::*;
-        let mut values = Jws::default();
-        let (_bl, _blb) = read_leb(data, at).unwrap_or((0, 1));
-        let mut _cursor = at + _blb;
-        let _end = _cursor + _bl as usize;
-        if _cursor < _end {
-            let (_tag, _tagb) = read_leb(data, _cursor).unwrap_or((0, 1));
-            if (_tag >> 1) as usize == 0 {
-                _cursor += _tagb;
-                let (_sv, _sb) = read_leb(data, _cursor).unwrap_or((0, 1)); _cursor += _sb;
-                values.algorithm = String::from_utf8_lossy(&data[_cursor.._cursor + _sv as usize]).into_owned(); _cursor += _sv as usize;
-            }
-        }
-        if _cursor < _end {
-            let (_tag, _tagb) = read_leb(data, _cursor).unwrap_or((0, 1));
-            if (_tag >> 1) as usize == 1 {
-                _cursor += _tagb;
-                let (_sv, _sb) = read_leb(data, _cursor).unwrap_or((0, 1)); _cursor += _sb;
-                values.key_id = Some(String::from_utf8_lossy(&data[_cursor.._cursor + _sv as usize]).into_owned()); _cursor += _sv as usize;
-            }
-        }
-        if _cursor < _end {
-            let (_tag, _tagb) = read_leb(data, _cursor).unwrap_or((0, 1));
-            if (_tag >> 1) as usize == 2 {
-                _cursor += _tagb;
-                let (_dv, _db) = read_leb(data, _cursor).unwrap_or((0, 1)); _cursor += _db;
-                values.signature = data[_cursor.._cursor + _dv as usize].to_vec(); _cursor += _dv as usize;
-            }
-        }
-        values
-    }
+    Ok(())
 }
 
 // ── Arena serde ─────────────────────────────────────────────────────────────
@@ -1294,7 +1262,7 @@ impl<const ID: u64> TokenArena<ID> {
         let body = b.finalize();
         let header_value = header_fn(original_offset, &body);
         let mut hb = DagrBuilder::new();
-        header_value.store_packed(&mut hb);
+        header_value.store_packed(&mut hb)?;
         let header_bytes = hb.finalize();
         let h = header_bytes.len();
         let stored_offset = (((original_offset + h) as u64) << 2) | 0b01;
@@ -1324,180 +1292,31 @@ impl<const ID: u64> TokenArena<ID> {
         gate(&header, stored_offset - h, body)?;
         let root_at = rl + stored_offset;
         let arena = Self::new();
-        let mut cache = std::collections::HashMap::new();
+        let mut cache = crate::dagr_runtime::RestoreCache::new();
         let root = _restore_claims(data, root_at, &arena, &mut cache)?;
+        _drain_pending(data, &arena, &mut cache)?;
         arena.set_root(Some(root));
         Ok(arena)
     }
 }
-
-
-// ── Direct Graph Builder ("31 Direct Graph Builder.md") ─────────────────────
-// Arena-free construction for this packed-rooted tree: plain value structs in,
-// byte-identical graph buffer out. `direct::to_bytes*(v) == arena.to_bytes*()`.
-pub mod direct {
-    use crate::dagr_runtime::{DagrBuilder, NodeStoreRef, DagrError};
-    use super::Jws;
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum Json<'a> {
-        String(&'a str),
-        Number(f64),
-        Bool(bool),
-        Array(&'a [Option<Json<'a>>]),
-        Object(&'a [JsonMember<'a>]),
-        Data(&'a [u8]),
-        Unknown(u8),
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Claims<'a> {
-        pub subject: Option<&'a str>,
-        pub issuer: Option<&'a str>,
-        pub audience: Option<&'a str>,
-        pub issued_at: u64,
-        pub expires_at: u64,
-        pub scopes: &'a [&'a str],
-        pub custom: Option<Json<'a>>,
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct JsonMember<'a> {
-        pub key: &'a str,
-        pub value: Option<Json<'a>>,
-    }
-
-    fn _supp_json<'a>(u: Json<'a>, b: &mut DagrBuilder) -> Result<(u64, u64), DagrError> {
-        let (_tid, _code): (u64, u64) = match u {
-            Json::String(v) => { let _bs = v.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); (0u64, 6u64) },
-            Json::Number(v) => { b.store_always_packed_f64(v); (1u64, 5u64) },
-            Json::Bool(v) => { b.store_bool(v); (2u64, 1u64) },
-            Json::Array(v) => {
-                let _uav_arr = v;
-                let _cnt_uav = _uav_arr.len();
-                let _bef_uav = b.cursor();
-                let _is_nil_uav: Vec<bool> = _uav_arr.iter().map(|x| x.is_none()).collect();
-                let mut _tids_uav: Vec<u64> = Vec::new();
-                let mut _codes_uav: Vec<u64> = Vec::new();
-                for _e in _uav_arr.into_iter().rev() {
-                    if let Some(_u) = _e {
-                        let (_tid, _code): (u64, u64) = _supp_json(_u.clone(), b)?;
-                        _tids_uav.push(_tid); _codes_uav.push(_code);
-                    }
-                }
-                let _hbef_uav = b.cursor();
-                for _i in 0.._tids_uav.len() { b.store_leb((_tids_uav[_i] << 3) | _codes_uav[_i]); }
-                b.store_leb((b.cursor() - _hbef_uav) as u64);
-                let _bs_uav = (_cnt_uav + 7) / 8;
-                for _bi in (0.._bs_uav).rev() {
-                    let mut _byte = 0u8;
-                    for _bit in 0usize..8 {
-                        let _idx = _bi * 8 + _bit;
-                        if _idx < _cnt_uav && _is_nil_uav[_idx] { _byte |= 1u8 << _bit; }
-                    }
-                    b.store_u8(_byte);
-                }
-                b.store_leb(_cnt_uav as u64);
-                b.store_leb((b.cursor() - _bef_uav) as u64);
-                (3u64, 6u64)
-            },
-            Json::Object(v) => {
-                let _uav_arr = v;
-                let _cnt_uav = _uav_arr.len();
-                let _bef_uav = b.cursor();
-                for _e in _uav_arr.iter().rev() {
-                    _e.store_packed(b)?;
-                }
-                b.store_leb(_cnt_uav as u64);
-                b.store_leb((b.cursor() - _bef_uav) as u64);
-                (4u64, 6u64)
-            },
-            Json::Data(v) => { b.store_raw(&v); b.store_leb(v.len() as u64); (5u64, 6u64) },
-            Json::Unknown(id) => (id as u64, 1u64),
-        };
-        Ok((_tid, _code))
-    }
-
-    impl<'a> Claims<'a> {
-        pub fn store_packed(&self, b: &mut DagrBuilder) -> Result<NodeStoreRef, DagrError> {
-            let _before = b.cursor();
-            let mut _obs0 = 0u8;
-            _obs0 |= u8::from(self.subject.is_some()) << 0;
-            _obs0 |= u8::from(self.issuer.is_some()) << 1;
-            _obs0 |= u8::from(self.audience.is_some()) << 2;
-            _obs0 |= u8::from(!self.scopes.is_empty()) << 3;
-            _obs0 |= u8::from(self.custom.is_some()) << 4;
-            let mut _ebs0 = 0u8;
-            { let _v = self.issued_at; _ebs0 |= u8::from(crate::dagr_runtime::leb_length(_v as u64) >= 8) << 0; }
-            { let _v = self.expires_at; _ebs0 |= u8::from(crate::dagr_runtime::leb_length(_v as u64) >= 8) << 1; }
-            if let Some(_u) = self.custom.clone() {
-                let (_tid, _code) = _supp_json(_u, b)?;
-                b.store_leb((_tid << 3) | _code);
-            }
-            {
-                let _scopes_arr = &self.scopes;
-                if !_scopes_arr.is_empty() {
-                let _cnt_scopes = _scopes_arr.len();
-                let _bef_scopes = b.cursor();
-                for _e in _scopes_arr.iter().rev() { b.store_blob(_e.as_bytes()); }
-                b.store_leb(_cnt_scopes as u64);
-                b.store_leb((b.cursor() - _bef_scopes) as u64);
-                }
-            }
-            { let _v = self.expires_at; if _ebs0 & 2 != 0 { b.store_u64(_v); } else { b.store_leb(_v as u64); } }
-            { let _v = self.issued_at; if _ebs0 & 1 != 0 { b.store_u64(_v); } else { b.store_leb(_v as u64); } }
-            if let Some(_s) = self.audience.as_deref() { let _bs = _s.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); }
-            if let Some(_s) = self.issuer.as_deref() { let _bs = _s.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); }
-            if let Some(_s) = self.subject.as_deref() { let _bs = _s.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); }
-            b.store_u8(_ebs0);
-            b.store_u8(_obs0);
-            b.store_leb((b.cursor() - _before) as u64);
-            Ok(NodeStoreRef::Offset(b.cursor()))
-        }
-    }
-
-    impl<'a> JsonMember<'a> {
-        pub fn store_packed(&self, b: &mut DagrBuilder) -> Result<NodeStoreRef, DagrError> {
-            let _before = b.cursor();
-            let mut _obs0 = 0u8;
-            _obs0 |= u8::from(self.value.is_some()) << 0;
-            if let Some(_u) = self.value.clone() {
-                let (_tid, _code) = _supp_json(_u, b)?;
-                b.store_leb((_tid << 3) | _code);
-            }
-            { let _bs = self.key.as_bytes(); b.store_raw(_bs); b.store_leb(_bs.len() as u64); }
-            b.store_u8(_obs0);
-            b.store_leb((b.cursor() - _before) as u64);
-            Ok(NodeStoreRef::Offset(b.cursor()))
-        }
-    }
-
-    pub fn to_bytes_with_header<F>(root: &Claims<'_>, header_fn: F) -> Result<Vec<u8>, DagrError>
-    where F: FnOnce(usize, &[u8]) -> Jws {
-        let mut b = DagrBuilder::with_capacity(4096);   // direct = tree → small buffer, grows if needed
-        let root_ref = root.store_packed(&mut b)?;
-        let root_off = root_ref.to_offset().unwrap_or(0);
-        let body_len = b.cursor();
-        let original_offset = body_len - root_off;
-        let header_value = header_fn(original_offset, b.record_bytes());
-        header_value.store_packed(&mut b);
-        let h = b.cursor() - body_len;
-        let stored_offset = (((original_offset + h) as u64) << 2) | 0b01;
-        b.store_leb(stored_offset);
-        Ok(b.finalize())
-    }
-
-    pub struct Writer;
-    impl Writer {
-        pub fn new() -> Self { Writer }
-        pub fn to_bytes_with_header<F>(&mut self, root: &Claims<'_>, header_fn: F) -> Result<Vec<u8>, DagrError>
-        where F: FnOnce(usize, &[u8]) -> Jws { to_bytes_with_header(root, header_fn) }
-    }
-    impl Default for Writer { fn default() -> Self { Writer::new() } }
+#[allow(dead_code)]
+fn _restore_ref_claims<'arena, G: TokenGraph>(
+    data: &'arena [u8], at: usize, arena: &'arena G, cache: &mut crate::dagr_runtime::RestoreCache,
+) -> Result<Claims<'arena, G>, DagrError> {
+    let _d = cache.depth();
+    cache.set_depth(0);
+    let _r = _restore_claims(data, at, arena, cache);
+    cache.set_depth(_d);
+    _r
 }
 
-pub struct Token;
-impl Token {
-    pub fn to_bytes_with_header<F>(root: &direct::Claims<'_>, header_fn: F) -> Result<Vec<u8>, DagrError>
-    where F: FnOnce(usize, &[u8]) -> Jws { direct::to_bytes_with_header(root, header_fn) }
+#[allow(dead_code)]
+fn _restore_ref_json_member<'arena, G: TokenGraph>(
+    data: &'arena [u8], at: usize, arena: &'arena G, cache: &mut crate::dagr_runtime::RestoreCache,
+) -> Result<JsonMember<'arena, G>, DagrError> {
+    let _d = cache.depth();
+    cache.set_depth(0);
+    let _r = _restore_json_member(data, at, arena, cache);
+    cache.set_depth(_d);
+    _r
 }

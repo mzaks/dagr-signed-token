@@ -1,5 +1,5 @@
 // Dagr serializer runtime (Phase 4). A faithful port of Swift's DataArenaBuilder
-// (dagr_codegen_swift_serde.py): a BACKWARD-growing builder. Every store writes toward
+// (dagr/codegen/swift/serde.py): a BACKWARD-growing builder. Every store writes toward
 // the FRONT of a single Uint8Array (the stored bytes occupy `[buf.length - cursor,
 // buf.length)`, the far end); the buffer doubles on demand and makeData() slices out the
 // stored region. `cursor` = total bytes stored so far; a BufferOffset is the cursor value
@@ -15,7 +15,10 @@ const _te = new TextEncoder();
 /** LEB byte length of a non-negative value. */
 export function lebLength(v: number | bigint): number {
   if (typeof v === "number") {                 // fast path: no BigInt (integers up to 2^53)
-    if (v <= 0) return 1;
+    if (v < 0x80) return 1;
+    if (v < 0x4000) return 2;
+    if (v < 0x200000) return 3;
+    if (v < 0x10000000) return 4;
     let n = 0, x = v;
     while (x > 0) { n++; x = Math.floor(x / 128); }
     return n;
@@ -27,10 +30,59 @@ export function lebLength(v: number | bigint): number {
   return n;
 }
 
+/** LEB value at `at` in `data` (a record built here, so well-formed). */
+function _lebAt(data: Uint8Array, at: number): number {
+  let result = 0, shift = 0, pos = at;
+  for (;;) {
+    const b = data[pos++]!;
+    result += (b & 0x7f) * 2 ** shift;   // not `<<`: 32-bit shifts corrupt values past bit 31
+    shift += 7;
+    if ((b & 0x80) === 0) return result;
+  }
+}
+
+/**
+ * The leading pad of a sink record's raw-embedded graph (spec 18 §11.4, spec 42 D6) — a
+ * port of `sink_raw_pad` in dagr/runtime/dagr_sink.py.
+ *
+ * `payload` is the record content — `[LEB size][fields]` — written with a pad of 0, its
+ * embedded graph starting at `bo`; `base` is the absolute stream position of the payload's
+ * first byte. The pad is the SMALLEST count in [0, 255] (it is stored in one byte) that
+ * puts the graph on an `n` boundary in the stream, COUNTING that the pad lengthens the two
+ * LEBs it sits inside — the field's payload length and the record's size — each of which
+ * may grow by a byte and move the graph one byte further than the pad alone. When no count
+ * does (possible only for n >= 128), the pad is 0.
+ */
+export function sinkRawPad(payload: Uint8Array, bo: number, base: number, n: number): number {
+  const c0 = _lebAt(payload, 0);                      // the record's size, pad 0
+  let q = bo - 2;                                     // the payload length LEB ends here (pad byte after)
+  while (q > 0 && (payload[q - 1]! & 0x80) !== 0) q--;
+  const p0 = _lebAt(payload, q);                      // the field's payload length, pad 0
+  const lc0 = lebLength(c0), lp0 = lebLength(p0);
+  for (let pad = 0; pad < 256; pad++) {
+    const growP = lebLength(p0 + pad) - lp0;
+    const growC = lebLength(c0 + pad + growP) - lc0;
+    if ((base + bo + pad + growP + growC) % n === 0) return pad;
+  }
+  return 0;
+}
+
 /** Zig-zag for signed distances (node-ref bidir pointers): n>=0 ? n<<1 : ~n<<1|1. */
 export function toZigZag(v: number | bigint): bigint {
   const x = typeof v === "bigint" ? v : BigInt(v);
   return x >= 0n ? x << 1n : ((~x) << 1n) | 1n;
+}
+
+/** Zig-zag that stays a `number` whenever the result fits in 2^53 (|v| < 2^52), so the
+ *  scalar/array writers take the non-BigInt `lebLength`/`storeLEB` paths; falls back to
+ *  `toZigZag` (BigInt) beyond that. Same value as `toZigZag`, different JS type. */
+export function zigzag(v: number | bigint): number | bigint {
+  if (typeof v === "number") {
+    if (v > -0x10000000000000 && v < 0x10000000000000) return v >= 0 ? v * 2 : -v * 2 - 1;
+    return toZigZag(v);
+  }
+  if (v > -0x10000000000000n && v < 0x10000000000000n) { const n = Number(v); return n >= 0 ? n * 2 : -n * 2 - 1; }
+  return toZigZag(v);
 }
 
 /** "Negative" zig-zag used for the vtable size marker: v==0 ? 0 : (v-1)<<1|1. */
@@ -120,7 +172,7 @@ function _signedWidthCode(d: number): number {
 export type NodeStoreRef = { off: number } | { pending: object };
 
 /**
- * Structural value-equality for write-side default elision ("13 Defaults and Prefabs.md"
+ * Structural value-equality for write-side default elision ("spec/14-defaults-and-prefabs.md"
  * §4): true when a field's runtime value equals its schema default so the serializer can
  * omit it. Handles scalars/bigint/strings (`Object.is` — bit-faithful for -0 / NaN,
  * matching Rust's `.to_bits()`), `Uint8Array` (byte-wise), plain arrays (element-wise),
@@ -159,12 +211,26 @@ export class Builder {
   // Replaces the old per-store `number[][]` chunk list — no micro-allocations per field,
   // no `makeData` concat pass. Late bindings record a CURSOR value (stable across grows),
   // patched at `buf.length - cursorAt`.
-  private buf = new Uint8Array(64);
+  private buf: Uint8Array;
+  private dv: DataView;   // over `buf`, re-made on every grow (float stores)
   cursor = 0;
+
+  /**
+   * Alignment offset (spec 12 §14): the number of bytes that will PRECEDE the finished
+   * buffer in whatever carries it (a frame header, a message prefix, a length word).
+   * Finish padding then aligns `alignmentOffset + total length` instead of the total
+   * length, so every `aligned(N)` array lands on its boundary in the ENVELOPE's frame.
+   * 0 (the default) is the plain buffer-relative alignment, byte for byte. No wire
+   * change — a reader neither knows nor needs it. Configuration, like the size bound:
+   * it survives `reset()`. Not applied to a graph with a customizable header.
+   */
+  alignmentOffset = 0;
 
   // reserveFieldPointerSize is derived from maxSize EXACTLY like Rust/Swift (with_max_size):
   // bits = bitLength(maxSize)+3; width = nextPow2(ceil(bits/8)). 2 MiB -> 4 B, 1024 -> 2 B.
-  constructor(maxSize: number = 2 * 1024 * 1024) {
+  constructor(maxSize: number = 2 * 1024 * 1024, initialCapacity: number = 64) {
+    this.buf = new Uint8Array(Math.max(16, initialCapacity));
+    this.dv = new DataView(this.buf.buffer);
     const bits = (32 - Math.clz32(maxSize)) + 3;
     const nbytes = (bits >> 3) + ((bits & 7) ? 1 : 0);
     this.reserveFieldPointerSize = 1 << (32 - Math.clz32(nbytes - 1));
@@ -190,6 +256,7 @@ export class Builder {
     const nb = new Uint8Array(cap);
     nb.set(this.buf.subarray(this.buf.length - this.cursor), cap - this.cursor);  // move tail to the new far end
     this.buf = nb;
+    this.dv = new DataView(nb.buffer);
   }
   /** Reserve `n` bytes at the front of the stored region; returns their start position. */
   private _wpos(n: number): number { this._ensure(n); const p = this.buf.length - this.cursor - n; this.cursor += n; return p; }
@@ -215,11 +282,8 @@ export class Builder {
   storeI32(v: number): number { return this.storeU32(v >>> 0); }
   storeI64(v: bigint): number { return this.storeU64(v & 0xffffffffffffffffn); }
 
-  storeF32(v: number): number { _f.setFloat32(0, v, true); return this.push([_f.getUint8(0), _f.getUint8(1), _f.getUint8(2), _f.getUint8(3)]); }
-  storeF64(v: number): number {
-    _f.setFloat64(0, v, true);
-    return this.push([_f.getUint8(0), _f.getUint8(1), _f.getUint8(2), _f.getUint8(3), _f.getUint8(4), _f.getUint8(5), _f.getUint8(6), _f.getUint8(7)]);
-  }
+  storeF32(v: number): number { const p = this._wpos(4); this.dv.setFloat32(p, v, true); return this.cursor; }
+  storeF64(v: number): number { const p = this._wpos(8); this.dv.setFloat64(p, v, true); return this.cursor; }
 
   /** Raw 2-byte f16/bf16 bits (frozen/vtable nodes). */
   storeF16(v: number): number { return this.storeU16(f32ToF16Bits(v)); }
@@ -236,7 +300,7 @@ export class Builder {
     if (Number.isNaN(v)) { this.storeU8(0x04); return false; }
     if (!Number.isFinite(v)) { this.storeU8(v < 0 ? 0x03 : 0x02); return false; }
     if (Number.isInteger(v) && Math.abs(v) < (1 << 21)) {
-      const zz = toZigZag(v);
+      const zz = zigzag(v);
       if (lebLength(zz) <= 3) { this.storeLEB(zz); this.storeU8(0x05); return false; }
     }
     const f16 = f32ToF16BitsExact(v);
@@ -251,7 +315,7 @@ export class Builder {
     if (Number.isNaN(v)) { this.storeU8(0x04); return false; }
     if (!Number.isFinite(v)) { this.storeU8(v < 0 ? 0x03 : 0x02); return false; }
     if (Number.isInteger(v) && Math.abs(v) < 2 ** 48) {
-      const zz = toZigZag(v);
+      const zz = zigzag(v);
       if (lebLength(zz) <= 7) { this.storeLEB(zz); this.storeU8(0x05); return false; }
     }
     const f32 = Math.fround(v);
@@ -315,12 +379,17 @@ export class Builder {
    * self-describing packed elems, mode 1 (`>> raw` fields) = raw native-LE. */
   storePackedFloatArray(elems: number[], isF64: boolean, raw = false): number {
     const before = this.cursor;
-    for (let i = elems.length - 1; i >= 0; i--) {
-      if (raw) { if (isF64) this.storeF64(elems[i]!); else this.storeF32(elems[i]!); }
-      else if (isF64) this.storePackedFloat64(elems[i]!, true);
-      else this.storePackedFloat32(elems[i]!, true);
+    if (raw) {
+      const w = isF64 ? 8 : 4, n = elems.length, p = this._wpos(n * w), dv = this.dv;
+      if (isF64) for (let i = 0; i < n; i++) dv.setFloat64(p + i * 8, elems[i]!, true);
+      else for (let i = 0; i < n; i++) dv.setFloat32(p + i * 4, elems[i]!, true);
+    } else {
+      for (let i = elems.length - 1; i >= 0; i--) {
+        if (isF64) this.storePackedFloat64(elems[i]!, true);
+        else this.storePackedFloat32(elems[i]!, true);
+      }
     }
-    this.storeLEB((BigInt(elems.length) << 2n) | (raw ? 1n : 0n));
+    this.storeLEB(elems.length * 4 + (raw ? 1 : 0));
     return this.storeLEB(this.cursor - before);
   }
 
@@ -377,7 +446,7 @@ export class Builder {
     } else {                                                  // one byte per typeId
       for (const a of applied) this.storeU8(a ? a.tid : 0);
     }
-    return this.storeLEB((BigInt(count) << 2n) | BigInt(wc));
+    return this.storeLEB(count * 4 + wc);
   }
 
   /**
@@ -405,7 +474,7 @@ export class Builder {
       if (signed) this._storeIntWc(d, wc);
       else this._storeUIntWc(d, wc);
     }
-    return this.storeLEB((BigInt(elems.length) << 2n) | BigInt(wc));
+    return this.storeLEB(elems.length * 4 + wc);
   }
 
   /**
@@ -416,11 +485,32 @@ export class Builder {
    */
   storeUtf8(s: string, dedup: boolean): number {
     if (dedup) { const hit = this.stringLookup.get(s); if (hit !== undefined) return hit; }
-    const bytes = _te.encode(s);
-    this.storeBytes(bytes);
-    const off = this.storeLEB(bytes.length);
+    const off = this.storeLEB(this._storeUtf8Bytes(s));
     if (dedup) this.stringLookup.set(s, off);
     return off;
+  }
+
+  /** Store the UTF-8 bytes of `s` (no length prefix); returns the byte count. Short
+   *  ASCII strings are copied char by char; anything else is `encodeInto` a reserved
+   *  worst-case (3 B per UTF-16 unit) region, then moved flush against the stored bytes. */
+  private _storeUtf8Bytes(s: string): number {
+    const n = s.length;
+    if (n <= 64) {
+      let ascii = true;
+      for (let i = 0; i < n; i++) if (s.charCodeAt(i) > 0x7f) { ascii = false; break; }
+      if (ascii) {
+        const p = this._wpos(n), buf = this.buf;
+        for (let i = 0; i < n; i++) buf[p + i] = s.charCodeAt(i);
+        return n;
+      }
+    }
+    const max = n * 3;
+    this._ensure(max);
+    const end = this.buf.length - this.cursor, start = end - max;
+    const w = _te.encodeInto(s, this.buf.subarray(start, end)).written;
+    if (w < max) this.buf.copyWithin(end - w, start, start + w);
+    this.cursor += w;
+    return w;
   }
 
   /** Length-prefixed data: [LEB count][bytes]. No dedup (Data has none). */
@@ -457,23 +547,35 @@ export class Builder {
   storeAlignedUtf8(s: string, N: number): number { return this.storeAlignedBytes(_te.encode(s), N); }
 
   /**
-   * Arena finish padding (§11 §4): insert zero bytes before the framing LEB so the
-   * total length (afterPad + framingLen) is ≡ 0 mod maxN, making every aligned
-   * element base buffer-relative aligned. Brute-forces the smallest pad because the
-   * framing LEB width depends on the (padded) distance. Mirrors
-   * storeFinishAlignmentPadding. Must be called after the root node is stored,
-   * before the framing word.
+   * Arena finish padding (spec 12 §4, §14): insert zero bytes before the framing LEB so
+   * that `alignmentOffset + total length` (total = afterPad + framingLen) is ≡ 0 mod
+   * maxN, making every aligned element base aligned — in the buffer's own frame when
+   * `alignmentOffset` is 0, in the frame of the envelope that carries it otherwise.
+   *
+   * The framing LEB's own length depends on the (padded) distance, hence the search. It
+   * runs over `[0, 2·maxN)`: that range crosses at most one step of the framing length,
+   * so one side of the step holds `maxN` consecutive candidates and a solution always
+   * exists (the old bound, `maxN`, could straddle the step and find none, leaving the
+   * buffer unpadded — spec 42 §1). The smallest pad wins, so every buffer that was
+   * padded correctly before is byte-identical. Must be called after the root node is
+   * stored, before the framing word.
    */
   storeFinishAlignmentPadding(rootOffset: number, maxN: number): void {
     if (maxN <= 1) return;
-    for (let p = 0; p < maxN; p++) {
+    const offset = this.alignmentOffset;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError(`alignmentOffset must be a non-negative integer, got ${offset}`);
+    }
+    const base = offset % maxN;                    // only `offset mod maxN` matters
+    for (let p = 0; p < 2 * maxN; p++) {
       const afterPad = this.cursor + p;
-      const framingLen = lebLength(BigInt(afterPad - rootOffset) << 2n);
-      if ((afterPad + framingLen) % maxN === 0) {
-        if (p) this.storeBytes(new Array(p).fill(0));
+      const framingLen = lebLength((afterPad - rootOffset) * 4);
+      if ((base + afterPad + framingLen) % maxN === 0) {
+        if (p) this.storeBytes(new Uint8Array(p));
         return;
       }
     }
+    throw new Error("finish padding: no pad found");   // unreachable (spec 42 §1)
   }
 
   /** Fixed-width numeric array: [LEB count][elem0..elemN-1] LE. Elements stored in
@@ -488,10 +590,16 @@ export class Builder {
 
   /** Packed int array (width ≥ 2): count-tag = (count<<2)|tag, tag 0 all-LEB / 1
    * all-raw / 2 mixed (enc bitset). Per element: LEB if smaller than the raw width,
-   * else raw fixed-width. `toLEB` yields the LEB value (zig-zag for signed). */
-  storePackedIntArray<T>(elems: T[], width: number, toLEB: (v: T) => bigint,
-                         storeRaw: (b: Builder, v: T) => void): number {
+   * else raw fixed-width. `toLEB` yields the LEB value (zig-zag for signed).
+   * `raw` (a `>> raw` field, spec/39): no probe, every element W bytes, tag 1. */
+  storePackedIntArray<T>(elems: T[], width: number, toLEB: (v: T) => number | bigint,
+                         storeRaw: (b: Builder, v: T) => void, raw = false): number {
     const before = this.cursor;
+    if (raw) {
+      for (let i = elems.length - 1; i >= 0; i--) storeRaw(this, elems[i]!);
+      this.storeLEB(elems.length * 4 + 1);
+      return this.storeLEB(this.cursor - before);
+    }
     const enc = new Array((elems.length + 7) >> 3).fill(0);
     let rawCount = 0;
     for (let i = elems.length - 1; i >= 0; i--) {
@@ -502,7 +610,7 @@ export class Builder {
     let tag = 0;
     if (rawCount === elems.length && elems.length > 0) tag = 1;
     else if (rawCount > 0) { tag = 2; this.storeBytes(enc); }
-    this.storeLEB((BigInt(elems.length) << 2n) | BigInt(tag));
+    this.storeLEB(elems.length * 4 + tag);
     return this.storeLEB(this.cursor - before);
   }
 
@@ -519,10 +627,17 @@ export class Builder {
   // (indexed by element i) marks absent slots. Each returns the blockLen offset.
 
   /** Packed int awo (width ≥ 2): [(count<<2)|tag][nil bs][enc bs if tag2][present].
-   * tag 0 all-LEB / 1 all-raw / 2 mixed; enc bit indexed by i. */
-  storePackedIntOptArray<T>(elems: (T | null)[], width: number, toLEB: (v: T) => bigint,
-                            storeRaw: (b: Builder, v: T) => void): number {
+   * tag 0 all-LEB / 1 all-raw / 2 mixed; enc bit indexed by i.
+   * `raw` (spec/39): no probe, present elements W bytes each, tag 1. */
+  storePackedIntOptArray<T>(elems: (T | null)[], width: number, toLEB: (v: T) => number | bigint,
+                            storeRaw: (b: Builder, v: T) => void, raw = false): number {
     const before = this.cursor, count = elems.length;
+    if (raw) {
+      for (let i = count - 1; i >= 0; i--) if (elems[i] !== null) storeRaw(this, elems[i] as T);
+      this.storeBytes(this._nilBits(elems));
+      this.storeLEB(count * 4 + 1);
+      return this.storeLEB(this.cursor - before);
+    }
     const enc = new Array((count + 7) >> 3).fill(0);
     let rawCount = 0, present = 0;
     for (let i = count - 1; i >= 0; i--) {
@@ -536,7 +651,7 @@ export class Builder {
     if (rawCount === present && present > 0) tag = 1;
     else if (rawCount > 0) { tag = 2; this.storeBytes(enc); }
     this.storeBytes(this._nilBits(elems));
-    this.storeLEB((BigInt(count) << 2n) | BigInt(tag));
+    this.storeLEB(count * 4 + tag);
     return this.storeLEB(this.cursor - before);
   }
 
@@ -581,7 +696,7 @@ export class Builder {
       else if (isF64) this.storePackedFloat64(elems[i] as number, true); else this.storePackedFloat32(elems[i] as number, true);
     }
     this.storeBytes(this._nilBits(elems));
-    this.storeLEB((BigInt(elems.length) << 2n) | (raw ? 1n : 0n));
+    this.storeLEB(elems.length * 4 + (raw ? 1 : 0));
     return this.storeLEB(this.cursor - before);
   }
 
@@ -721,8 +836,15 @@ export class Builder {
   /** LEB128, low 7 bits first (mirrors _storeAsLEB; value 0 → single 0x00). */
   storeLEB(value: number | bigint): number {
     if (typeof value === "number") {           // fast path: no BigInt, no temp array (use % / Math.floor — & is 32-bit)
-      if (value <= 0) { const p0 = this._wpos(1); this.buf[p0] = 0; return this.cursor; }
+      if (value < 0x80) { const p0 = this._wpos(1); this.buf[p0] = value > 0 ? value : 0; return this.cursor; }
       const n = lebLength(value);
+      if (value < 0x80000000) {
+        const p = this._wpos(n), buf = this.buf;
+        let x = value;
+        for (let i = 0; i < n - 1; i++) { buf[p + i] = (x & 0x7f) | 0x80; x >>>= 7; }
+        buf[p + n - 1] = x;
+        return this.cursor;
+      }
       const p = this._wpos(n);
       let x = value;
       for (let i = 0; i < n; i++) { const b = x % 128; x = Math.floor(x / 128); this.buf[p + i] = x > 0 ? b | 0x80 : b; }
@@ -767,7 +889,7 @@ export class Builder {
    * variant, or as a union-array element — needs no width code: the reader recovers
    * each variant's width from the schema (scalars) or self-describing pointers
    * (utf8/data/node/array). Keeping the low 2 bits zero makes the byte identical to
-   * Rust/Swift. See spec "04 Union Types.md" (nested-union value form).
+   * Rust/Swift. See spec "spec/05-union-types.md" (nested-union value form).
    */
   storeNestedUnionSlot(a: { id: number; emit: (b: Builder) => void }): number {
     a.emit(this);
@@ -822,7 +944,7 @@ export class Builder {
         this._addLateBinding(r.pending, { cursorAt: this.cursor, base: 0, arrayEnd: cur, es });
       }
     }
-    return this.storeLEB((BigInt(elems.length) << 2n) | BigInt(wc));
+    return this.storeLEB(elems.length * 4 + wc);
   }
 
   private _addLateBinding(id: object, bind: { cursorAt: number; base: number; arrayEnd: number; es: number }): void {
@@ -924,8 +1046,205 @@ export class Builder {
     this.lateBindings.clear();
   }
 
+  /** The stored region as a VIEW (no copy) — valid until the next store / reset. */
+  recordBytes(): Uint8Array {
+    return this.buf.subarray(this.buf.length - this.cursor);
+  }
+
   /** The finished buffer: the stored region [buf.length - cursor, buf.length), copied out. */
   makeData(): Uint8Array {
     return this.buf.slice(this.buf.length - this.cursor);
+  }
+}
+
+/**
+ * A sink writer's stream: a growing byte buffer (`length` bytes written). Records are
+ * appended in place — the forward path writes into it directly (`SinkForward.begin`).
+ */
+export class SinkBytes {
+  buf = new Uint8Array(1024);
+  dv = new DataView(this.buf.buffer);
+  length = 0;
+
+  /** Makes room for `n` more bytes (the buffer doubles). */
+  reserve(n: number): void {
+    if (this.length + n <= this.buf.length) return;
+    const nb = new Uint8Array(Math.max(this.length + n, 2 * this.buf.length));
+    nb.set(this.buf.subarray(0, this.length));
+    this.buf = nb;
+    this.dv = new DataView(nb.buffer);
+  }
+
+  leb(v: number): void {
+    this.reserve(10);
+    const buf = this.buf;
+    let x = v;
+    while (x >= 0x80) { buf[this.length++] = (x % 128) | 0x80; x = Math.floor(x / 128); }
+    buf[this.length++] = x;
+  }
+
+  /** An RLEB: the LEB bytes reversed, so the terminator (high bit clear) leads and a
+   *  right-to-left read self-delimits ("spec/11-data-sink.md" §11.4). */
+  rleb(v: number): void {
+    const n = lebLength(v);
+    this.reserve(n);
+    let x = v;
+    for (let i = n - 1; i >= 0; i--) { this.buf[this.length + i] = (x % 128) | (i === 0 ? 0 : 0x80); x = Math.floor(x / 128); }
+    this.length += n;
+  }
+
+  bytes(b: Uint8Array): void {
+    this.reserve(b.length);
+    this.buf.set(b, this.length);
+    this.length += b.length;
+  }
+
+  /** A copy of the bytes from `from` to the end. */
+  slice(from: number): Uint8Array { return this.buf.slice(from, this.length); }
+}
+
+/**
+ * A sink record of bounded scalars written FRONT TO BACK ("spec/11-data-sink.md" §6.1) at the
+ * end of the stream (`begin`): a generated `_fwd{Record}` writes its fields `lead` bytes in —
+ * room for the type id and the size at their bound — and `finish` puts both in front (the
+ * fields move up when the size is shorter than its bound) and, doubly linked, the span (an
+ * RLEB) behind. No builder, no store per field, no copy. Every method writes the bytes the
+ * backward `Builder` store the generated `_store{Record}` makes for that field kind: change
+ * one, change both (gate: `tests/schemas/sink_forward.py`, `gen_sink_forward_tests_ts.py`).
+ */
+export class SinkForward {
+  private out = new SinkBytes();
+  private buf = this.out.buf;
+  private dv = this.out.dv;
+  private fields = 0;
+  private p = 0;
+
+  /** Starts a record of at most `room` bytes at the end of `out`, its fields `lead` bytes in. */
+  begin(out: SinkBytes, room: number, lead: number): void {
+    out.reserve(room);
+    this.out = out;
+    this.buf = out.buf;
+    this.dv = out.dv;
+    this.fields = out.length + lead;
+    this.p = this.fields;
+  }
+
+  leb(value: number | bigint): void {
+    const buf = this.buf;
+    if (typeof value === "number") {
+      let x = value;
+      if (x < 0x80000000) {
+        while (x >= 0x80) { buf[this.p++] = (x & 0x7f) | 0x80; x >>>= 7; }
+        buf[this.p++] = x;
+        return;
+      }
+      while (x >= 0x80) { buf[this.p++] = (x % 128) | 0x80; x = Math.floor(x / 128); }
+      buf[this.p++] = x;
+      return;
+    }
+    let x = value;
+    while (x >= 0x80n) { buf[this.p++] = Number(x & 0x7fn) | 0x80; x >>= 7n; }
+    buf[this.p++] = Number(x);
+  }
+
+  /** The low `w` bytes of `v` (two's complement), little-endian — the backward store's bytes. */
+  private raw(v: number | bigint, w: number): void {
+    const p = this.p;
+    if (w === 8) this.dv.setBigUint64(p, BigInt.asUintN(64, BigInt(v)), true);
+    else if (w === 4) this.dv.setUint32(p, Number(v) >>> 0, true);
+    else this.dv.setUint16(p, Number(v) & 0xffff, true);
+    this.p = p + w;
+  }
+
+  private taggedByte(tag: number, v: number): void {
+    this.leb(tag);
+    this.buf[this.p++] = v & 0xff;
+  }
+
+  /** `[tag | 1][byte]` — u8, i8, bool and byte-wide enums. */
+  byte(v: number, index: number): void { this.taggedByte(index * 2 + 1, v); }
+
+  /** `[tag][payload]` of a u16..u64 field (an enum's raw value): a LEB when shorter than `w`
+   *  bytes, unless `raw` (spec 39). */
+  uint(v: number | bigint, w: number, index: number, raw: boolean): void {
+    if (typeof v === "bigint" && v < 0x20000000000000n) v = Number(v);   // the number paths below 2^53
+    if (!raw && lebLength(v) < w) { this.leb(index * 2); this.leb(v); return; }
+    this.leb(index * 2 + 1);
+    this.raw(v, w);
+  }
+
+  /** `[tag][payload]` of an i16..i64 field: its ZigZag LEB when shorter than `w` bytes. */
+  int(v: number | bigint, w: number, index: number, raw: boolean): void {
+    if (!raw) {
+      const zz = zigzag(v);
+      if (lebLength(zz) < w) { this.leb(index * 2); this.leb(zz); return; }
+    }
+    this.leb(index * 2 + 1);
+    this.raw(v, w);
+  }
+
+  /** A `raw` f32 / f64 field (spec 39): `[tag | 1][4 / 8 bytes]`. */
+  rawF32(v: number, index: number): void { this.leb(index * 2 + 1); this.dv.setFloat32(this.p, v, true); this.p += 4; }
+  rawF64(v: number, index: number): void { this.leb(index * 2 + 1); this.dv.setFloat64(this.p, v, true); this.p += 8; }
+
+  /** An f16 / bf16 field — `Builder.storePackedF16Scalar` behind its tag. */
+  half(v: number, isBf16: boolean, index: number): void {
+    if (Object.is(v, 0)) return this.taggedByte(index * 2, 0x00);
+    if (Object.is(v, -0)) return this.taggedByte(index * 2, 0x01);
+    if (Number.isNaN(v)) return this.taggedByte(index * 2, 0x04);
+    if (!Number.isFinite(v)) return this.taggedByte(index * 2, v < 0 ? 0x03 : 0x02);
+    this.leb(index * 2 + 1);
+    this.raw(isBf16 ? f32ToBf16Bits(v) : f32ToF16Bits(v), 2);
+  }
+
+  /** An f32 field — `Builder.storePackedFloat32(v, false)` behind its tag. */
+  f32(v: number, index: number): void {
+    if (Object.is(v, 0)) return this.taggedByte(index * 2, 0x00);
+    if (Object.is(v, -0)) return this.taggedByte(index * 2, 0x01);
+    if (Number.isNaN(v)) return this.taggedByte(index * 2, 0x04);
+    if (!Number.isFinite(v)) return this.taggedByte(index * 2, v < 0 ? 0x03 : 0x02);
+    if (Number.isInteger(v) && Math.abs(v) < (1 << 21)) {
+      const zz = zigzag(v);
+      if (lebLength(zz) <= 3) { this.taggedByte(index * 2, 0x05); this.leb(zz); return; }
+    }
+    const f16 = f32ToF16BitsExact(v);
+    if (f16 !== null) { this.taggedByte(index * 2, 0x06); this.raw(f16, 2); return; }
+    this.rawF32(v, index);
+  }
+
+  /** An f64 field — `Builder.storePackedFloat64(v, false)` behind its tag. */
+  f64(v: number, index: number): void {
+    if (Object.is(v, 0)) return this.taggedByte(index * 2, 0x00);
+    if (Object.is(v, -0)) return this.taggedByte(index * 2, 0x01);
+    if (Number.isNaN(v)) return this.taggedByte(index * 2, 0x04);
+    if (!Number.isFinite(v)) return this.taggedByte(index * 2, v < 0 ? 0x03 : 0x02);
+    if (Number.isInteger(v) && Math.abs(v) < 2 ** 48) {
+      const zz = zigzag(v);
+      if (lebLength(zz) <= 7) { this.taggedByte(index * 2, 0x05); this.leb(zz); return; }
+    }
+    const f32 = Math.fround(v);
+    if (f32 === v) {
+      const f16 = f32ToF16BitsExact(f32);
+      if (f16 !== null) { this.taggedByte(index * 2, 0x06); this.raw(f16, 2); return; }
+      this.taggedByte(index * 2, 0x07);
+      this.dv.setFloat32(this.p, f32, true);
+      this.p += 4;
+      return;
+    }
+    this.rawF64(v, index);
+  }
+
+  /** Puts `[type id][size]` in front of the fields — which move up when the size is shorter
+   *  than its bound — and, doubly linked, the span (an RLEB) behind; the stream now ends
+   *  after the record. */
+  finish(typeId: number, doublyLinked: boolean): void {
+    const body = this.p - this.fields, src = this.fields, start = this.out.length;
+    this.p = start;
+    this.leb(typeId);
+    this.leb(body);
+    const q = this.p;
+    if (q !== src) this.buf.copyWithin(q, src, src + body);
+    this.out.length = q + body;
+    if (doublyLinked) this.out.rleb(this.out.length - start);
   }
 }

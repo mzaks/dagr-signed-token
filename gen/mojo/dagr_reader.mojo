@@ -1,8 +1,8 @@
 # Dagr lazy-read runtime primitives (Mojo) — Phase 0 spike.
 #
 # Hand-ported from the TS/Swift/Rust generated runtime
-# (RethinkingDagrTS/src/dagr_reader.ts, Sources/RethinkingDagr/DagrRuntime.swift).
-# This is the "26 Mojo Codegen Plan.md" §7 Phase 0 surface: just enough of the
+# (targets/typescript/src/dagr_reader.ts, targets/swift/Sources/DagrExample/DagrRuntime.swift).
+# This is the "spec/28-mojo-codegen-plan.md" §7 Phase 0 surface: just enough of the
 # wire primitives to lazily read a regular (vtable) node of required scalars.
 #
 # Reader model (plan §8.2): a single borrowed `Span[UInt8, origin]`; Mojo reads
@@ -86,8 +86,33 @@ def zigzag_decode(n: UInt64) -> Int64:
 # f16/bf16 are NATIVE Mojo dtypes — no bit-twiddling (the TS win, plan §8.1).
 
 def _bounds(buf: Span[UInt8, _], at: Int, width: Int) raises:
-    if at < 0 or at + width > len(buf):
+    # never `at + width`: Mojo's Int wraps silently, so a hostile width could wrap past the check
+    if at < 0 or width < 0 or at > len(buf) or width > len(buf) - at:
         raise Error("outsideOfBuffer")
+
+
+# A count read off the wire, checked before anything loops over it or reserves room for it
+# (spec/38 §10.1): `count` elements of at least `bits` bits each must fit in the bytes from `at`.
+def _wire_count(buf: Span[UInt8, _], at: Int, count: Int, bits: Int) raises -> Int:
+    if count < 0 or at < 0 or at > len(buf) or count > (len(buf) - at) * 8 // bits:
+        raise Error("outsideOfBuffer")
+    return count
+
+
+# spec/43: `count` native-LE elements of `width` bytes at `base`, copied as ONE block into a
+# new List — the reader's mirror of the writer's `store_raw_block`. Raises `outsideOfBuffer`
+# (like the element reads) when the block does not fit; the count is checked before anything
+# is allocated, so a hostile count cannot ask for a huge List. `width` is the in-memory width
+# of `Scalar[dt]` (every caller passes it).
+def copy_le_block[dt: DType, width: Int](buf: Span[UInt8, _], base: Int, count: Int) raises -> List[Scalar[dt]]:
+    if count < 0 or count > len(buf):
+        raise Error("outsideOfBuffer")
+    _bounds(buf, base, count * width)
+    var out = List[Scalar[dt]](unsafe_uninit_length=count)
+    if count > 0:
+        unsafe_memcpy(dest=out.unsafe_ptr().unsafe_bitcast[UInt8](),
+                      src=buf.unsafe_ptr().unsafe_offset(base), count=count * width)
+    return out^
 
 
 def read_u8(buf: Span[UInt8, _], at: Int) raises -> UInt8:
@@ -185,7 +210,7 @@ def read_bitset(buf: Span[UInt8, _], at: Int, nbytes: Int) raises -> UInt64:
     return b
 
 
-# ── Packed-node primitives (06 Packed Nodes.md) ──────────────────────────────
+# ── Packed-node primitives (spec/07-packed-nodes.md) ──────────────────────────────
 from std.math import inf, nan
 
 # Signed packed ints are ZigZag-LEB. Returns (value, bytesConsumed).
@@ -279,7 +304,7 @@ def decode_packed_bf16(buf: Span[UInt8, _], at: Int) raises -> Tuple[BFloat16, I
     return (BFloat16(0.0), 1)  # tag 0 (+0)
 
 
-# ── Packed arrays (materialized) — 06 §5 ────────────────────────────────────
+# ── Packed arrays (materialized) — 07 §5 ────────────────────────────────────
 # Packed array elements are variable-width (LEB / packed-float / mixed), so unlike
 # the regular fixed-width arrays these are decoded eagerly into an owned wrapper
 # with the same `len()` / `get(i)` API. `OwnedArray[T]` holds a `List[T]`.
@@ -300,6 +325,11 @@ struct OwnedArray[T: Copyable & Deinitable](Copyable, Movable, Sized):
     # instead of re-copying it element-by-element (the packed double-materialization).
     def into_list(deinit self) -> List[Self.T]:
         return self.items^
+
+    # Every element as a List (a copy; `into_list` moves) — the bulk-read surface every
+    # value array shares (spec/43).
+    def to_list(self) -> List[Self.T]:
+        return self.items.copy()
 
 
 # Lazy view over a packed FLOAT value array. Unlike the eager `OwnedArray` (which
@@ -325,12 +355,12 @@ struct PackedFloatArray[o: ImmOrigin, dt: DType, width: Int](
         self.buf = buf
         var c = read_leb(buf, at)
         comptime if Self.dt == DType.float16 or Self.dt == DType.bfloat16:
-            self._count = Int(c[0])                       # plain count, no mode bits
             self._enc = at + c[1]
+            self._count = _wire_count(buf, self._enc, Int(c[0]), 9)   # plain count: enc bit + ≥ 1 byte
             self._base = self._enc + (self._count + 7) // 8
             self._raw = False
         else:
-            self._count = Int(c[0]) >> 2                  # low 2 bits = array-wide mode
+            self._count = _wire_count(buf, at + c[1], Int(c[0] >> 2), 8)   # low 2 bits = array-wide mode
             self._raw = (Int(c[0]) & 3) == 1
             self._enc = -1
             self._base = at + c[1]
@@ -342,13 +372,13 @@ struct PackedFloatArray[o: ImmOrigin, dt: DType, width: Int](
     # per-element enc-bitset bit for the half formats (unused for f32/f64).
     def _read(self, p: Int, i: Int) raises -> Tuple[Scalar[Self.dt], Int]:
         comptime if Self.dt == DType.float16:
-            if (self.buf[self._enc + (i >> 3)] >> UInt8(i & 7)) & 1 == 1:
+            if (read_u8(self.buf, self._enc + (i >> 3)) >> UInt8(i & 7)) & 1 == 1:
                 _bounds(self.buf, p, 2)
                 return ((self.buf.unsafe_ptr().unsafe_offset(p)).unsafe_bitcast[Scalar[Self.dt]]().unsafe_load[alignment=1](), 2)
             var v = decode_packed_f16(self.buf, p)
             return (rebind[Scalar[Self.dt]](v[0]), v[1])
         elif Self.dt == DType.bfloat16:
-            if (self.buf[self._enc + (i >> 3)] >> UInt8(i & 7)) & 1 == 1:
+            if (read_u8(self.buf, self._enc + (i >> 3)) >> UInt8(i & 7)) & 1 == 1:
                 _bounds(self.buf, p, 2)
                 return ((self.buf.unsafe_ptr().unsafe_offset(p)).unsafe_bitcast[Scalar[Self.dt]]().unsafe_load[alignment=1](), 2)
             var v = decode_packed_bf16(self.buf, p)
@@ -378,14 +408,16 @@ struct PackedFloatArray[o: ImmOrigin, dt: DType, width: Int](
     def get(self, i: Int) raises -> Scalar[Self.dt]:   # OwnedArray-compatible accessor
         return self[i]
 
+    # Every element as a List (spec/43: one block copy in raw mode). Same as `into_list`.
+    def to_list(self) raises -> List[Scalar[Self.dt]]:
+        return self.into_list()
+
     def into_list(self) raises -> List[Scalar[Self.dt]]:
+        comptime if Self.dt == DType.float32 or Self.dt == DType.float64:
+            if self._raw:                              # one native-LE block (spec/43)
+                return copy_le_block[Self.dt, Self.width](self.buf, self._base, self._count)
         var out = List[Scalar[Self.dt]](capacity=self._count)
         var p = self._base
-        comptime if Self.dt == DType.float32 or Self.dt == DType.float64:
-            if self._raw:                              # fixed-width fast path
-                for i in range(self._count):
-                    out.append(self._read(p, i)[0]); p += Self.width
-                return out^
         for i in range(self._count):                   # packed / half: variable-width walk
             var v = self._read(p, i)
             out.append(v[0]); p += v[1]
@@ -400,6 +432,8 @@ def decode_packed_int_array[dt: DType, width: Int, signed: Bool](buf: Span[UInt8
     var count = Int(c[0]) >> 2
     var tag = Int(c[0]) & 3
     var enc_start = at + c[1]
+    if tag == 1:                                    # all raw: one native-LE block (spec/43)
+        return copy_le_block[dt, width](buf, enc_start, count)
     var p = enc_start + ((count + 7) // 8 if tag == 2 else 0)
     if tag == 2:
         _bounds(buf, enc_start, (count + 7) // 8)   # guard the enc-bitset region once
@@ -427,12 +461,7 @@ def decode_packed_int_array[dt: DType, width: Int, signed: Bool](buf: Span[UInt8
 # Packed u8/i8 array: plain `[LEB count][raw bytes]` (single-path, no count-tag).
 def decode_byte_array[dt: DType](buf: Span[UInt8, _], at: Int) raises -> List[Scalar[dt]]:
     var c = read_leb(buf, at)
-    var count = Int(c[0])
-    var p = at + c[1]
-    var out = List[Scalar[dt]]()
-    for i in range(count):
-        out.append((buf.unsafe_ptr().unsafe_offset(p + i)).unsafe_bitcast[Scalar[dt]]().unsafe_load[alignment=1]())
-    return out^
+    return copy_le_block[dt, 1](buf, at + c[1], Int(c[0]))   # one block (spec/43)
 
 
 # Packed float array `[LEB (count<<2)|mode][elems]`: mode 0 = self-describing packed
@@ -442,6 +471,8 @@ def decode_packed_f32_array(buf: Span[UInt8, _], at: Int) raises -> List[Float32
     var count = Int(c[0]) >> 2
     var mode = Int(c[0]) & 3
     var p = at + c[1]
+    if mode == 1:                                   # raw: one native-LE block (spec/43)
+        return copy_le_block[DType.float32, 4](buf, p, count)
     var out = List[Float32]()
     for _ in range(count):
         if mode == 1:
@@ -456,6 +487,8 @@ def decode_packed_f64_array(buf: Span[UInt8, _], at: Int) raises -> List[Float64
     var count = Int(c[0]) >> 2
     var mode = Int(c[0]) & 3
     var p = at + c[1]
+    if mode == 1:                                   # raw: one native-LE block (spec/43)
+        return copy_le_block[DType.float64, 8](buf, p, count)
     var out = List[Float64]()
     for _ in range(count):
         if mode == 1:
@@ -516,7 +549,7 @@ def decode_packed_half_array[dt: DType, is_bf: Bool](buf: Span[UInt8, _], at: In
     var p = enc + (count + 7) // 8
     var out = List[Scalar[dt]]()
     for i in range(count):
-        if (buf[enc + (i >> 3)] >> UInt8(i & 7)) & 1 == 1:  # raw
+        if (read_u8(buf, enc + (i >> 3)) >> UInt8(i & 7)) & 1 == 1:  # raw
             out.append((buf.unsafe_ptr().unsafe_offset(p)).unsafe_bitcast[Scalar[dt]]().unsafe_load[alignment=1]())
             p += 2
         else:  # self-describing special (rebind through the concrete dtype decoder)
@@ -670,7 +703,7 @@ def decode_packed_bool_opt_list(buf: Span[UInt8, _], at: Int) raises -> List[Opt
     for i in range(count):                  # the buffer) stays checked via `buf[...]` below
         if (bp[unsafe_offset=nil_s + (i >> 3)] >> UInt8(i & 7)) & 1 == 1:
             out.append(None); continue
-        out.append((buf[val_s + (ci >> 3)] >> UInt8(ci & 7)) & 1 != 0); ci += 1
+        out.append((read_u8(buf, val_s + (ci >> 3)) >> UInt8(ci & 7)) & 1 != 0); ci += 1
     return out^
 
 
@@ -689,7 +722,7 @@ def decode_enum_bit_opt_list[bits: Int](buf: Span[UInt8, _], at: Int) raises -> 
     for i in range(count):
         if (bp[unsafe_offset=nil_s + (i >> 3)] >> UInt8(i & 7)) & 1 == 1:
             out.append(None); continue
-        var byte = buf[val_s + ci // per_byte]
+        var byte = read_u8(buf, val_s + ci // per_byte)
         out.append((byte >> UInt8((ci % per_byte) * bits)) & mask); ci += 1
     return out^
 
@@ -745,7 +778,7 @@ def decode_data_opt_list(buf: Span[UInt8, _], at: Int) raises -> List[Optional[L
     return out^
 
 
-# Packed union header `[LEB (typeId<<3)|code][payload]` (06 §8). Returns
+# Packed union header `[LEB (typeId<<3)|code][payload]` (07 §8). Returns
 # (payload_pos, tag, code): tag = raw>>3, code = raw&7 (payload size class:
 # 0 LEB · 1/2/3/4 = 1/2/4/8 raw bytes · 5 packed-float · 6 len-prefixed block).
 def packed_union_header(buf: Span[UInt8, _], at: Int) raises -> Tuple[Int, UInt8, UInt8]:
@@ -772,7 +805,40 @@ def packed_union_payload_bytes(buf: Span[UInt8, _], ep: Int, code: Int) raises -
     return r[1] + Int(r[0])
 
 
-# Raw embedded-graph leaf (17 §4): a `raw` node-ref inline entry
+# ── Packed-union value variants decoded by the header CODE (07 §8, 42 §3) ─────────
+# A half (f16 / bf16) variant is ALWAYS its two raw bytes under code 2. Writers before
+# spec 42 stored the 16 bits as a varint under code 0 when they were below 128 (`+0.0`
+# was one zero byte) — still accepted, and decoded as that varint (NOT with the §12
+# field codec, which agrees for +0.0 only).
+def read_union_f16(buf: Span[UInt8, _], vp: Int, code: UInt8) raises -> Float16:
+    if code == 0:
+        return Float16(from_bits=UInt16(read_leb(buf, vp)[0] & 0xffff))
+    return read_f16(buf, vp)
+
+
+def read_union_bf16(buf: Span[UInt8, _], vp: Int, code: UInt8) raises -> BFloat16:
+    if code == 0:
+        return BFloat16(from_bits=UInt16(read_leb(buf, vp)[0] & 0xffff))
+    return read_bf16(buf, vp)
+
+
+# An enum variant of a WIDER-than-a-byte enum is stored like an enum field: a varint
+# under code 0 when that is shorter than the backing width, else the backing width under
+# code 2 / 3 / 4. Decoded by the code, which also reads what writers before spec 42
+# stored — one byte under code 1, whatever the enum's width. Returns the raw value.
+def read_union_enum(buf: Span[UInt8, _], vp: Int, code: UInt8) raises -> UInt64:
+    if code == 0:
+        return read_leb(buf, vp)[0]
+    if code == 1:
+        return UInt64(read_u8(buf, vp))
+    if code == 2:
+        return UInt64(read_u16(buf, vp))
+    if code == 3:
+        return UInt64(read_u32(buf, vp))
+    return read_u64(buf, vp)
+
+
+# Raw embedded-graph leaf (18 §4): a `raw` node-ref inline entry
 # `[LEB payloadLen][pad?][standalone .dagr blob]`. `pos` = payloadLen LEB start;
 # `has_pad` = the embedded graph is alignment-bearing (a leading pad byte precedes
 # the blob framing). Returns the absolute root-node position inside the blob (opened
@@ -817,8 +883,7 @@ def read_utf8[o: ImmOrigin](buf: Span[UInt8, o], at: Int) raises -> Tuple[String
     var r = read_leb(buf, at)
     var length = Int(r[0])
     var start = at + r[1]
-    if start + length > len(buf):
-        raise Error("outsideOfBuffer")
+    _bounds(buf, start, length)   # a hostile length may be negative as an Int, or wrap a sum
     return (StringSlice(unsafe_from_utf8=buf[start : start + length]), r[1] + length)
 
 
@@ -826,8 +891,7 @@ def read_data[o: ImmOrigin](buf: Span[UInt8, o], at: Int) raises -> Tuple[Span[U
     var r = read_leb(buf, at)
     var length = Int(r[0])
     var start = at + r[1]
-    if start + length > len(buf):
-        raise Error("outsideOfBuffer")
+    _bounds(buf, start, length)   # a hostile length may be negative as an Int, or wrap a sum
     return (buf[start : start + length], r[1] + length)
 
 
@@ -857,7 +921,7 @@ def restore_rtype_vtable(buf: Span[UInt8, _], start: Int) raises -> List[Int]:
             v = Int(read_u16(buf, cursor))
             cursor += 2
         else:
-            v = Int(buf[cursor])
+            v = Int(read_u8(buf, cursor))
             cursor += 1
         if v == 0:
             result.append(-1)
@@ -886,7 +950,7 @@ def rtype_vtable_slot(buf: Span[UInt8, _], start: Int, idx: Int) raises -> Int:
         return -1
     var wide = (vt_size & 1) != 0
     var cursor = vt_start + b2 + (idx * 2 if wide else idx)
-    var v = Int(read_u16(buf, cursor)) if wide else Int(buf[cursor])
+    var v = Int(read_u16(buf, cursor)) if wide else Int(read_u8(buf, cursor))
     if v == 0:
         return -1
     return v - 1 + b1
@@ -915,6 +979,10 @@ struct NumArray[o: ImmOrigin, dt: DType, width: Int](Copyable, Movable, Implicit
         return (
             self.buf.unsafe_ptr().unsafe_offset(self.base + i * Self.width)
         ).unsafe_bitcast[Scalar[Self.dt]]().unsafe_load[alignment=1]()
+
+    # Every element as a List — one native-LE block copy (spec/43).
+    def to_list(self) raises -> List[Scalar[Self.dt]]:
+        return copy_le_block[Self.dt, Self.width](self.buf, self.base, self.count)
 
 
 # Bool array: `[LEB count][bitset ceil(count/8)]` — bit i = element i. `base` = the
@@ -1033,7 +1101,7 @@ struct EnumBitOptArray[o: ImmOrigin, bits: Int](Copyable, Movable, ImplicitlyCop
 def read_rel_offset_u(buf: Span[UInt8, _], at: Int, es: Int) raises -> Int:
     var v: UInt64 = 0
     for k in range(es):
-        v += UInt64(buf[at + k]) << UInt64(8 * k)
+        v += UInt64(read_u8(buf, at + k)) << UInt64(8 * k)
     return Int(v)
 
 
@@ -1046,6 +1114,55 @@ def read_rel_offset_s(buf: Span[UInt8, _], at: Int, es: Int) raises -> Int:
     if bits < 64 and (v & (1 << (bits - 1))) != 0:
         v -= 1 << bits
     return v
+
+
+# Signed-int VALUE variant of a regular / frozen union-array element. The slot holds the
+# value's bit pattern at the TYPE's width, ZERO-extended to the slot width `es` — which is
+# the minimal width over the array's slots, so it may be narrower OR wider than the type.
+# Read `es` bytes unsigned and sign-reinterpret at the TYPE's width — never at the slot's:
+# an i32 200 in a one-byte slot is 200, not -56 (spec 42 §6, `union_narrow_signed_slots`).
+def read_slot_i8(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Int8:
+    return UInt8(read_rel_offset_u(buf, sp, es) & 0xff).cast[DType.int8]()
+
+
+def read_slot_i16(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Int16:
+    return UInt16(read_rel_offset_u(buf, sp, es) & 0xffff).cast[DType.int16]()
+
+
+def read_slot_i32(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Int32:
+    return UInt32(read_rel_offset_u(buf, sp, es) & 0xffffffff).cast[DType.int32]()
+
+
+def read_slot_i64(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Int64:
+    return Int64(read_rel_offset_u(buf, sp, es))   # 8 bytes, or fewer zero-extended
+
+
+# Float VALUE variant of a regular / frozen union-array element. The slot width `es` is
+# the MINIMAL width over the array's slots, so it can be NARROWER than the float (`+0.0`
+# has bits 0 — a one-byte slot): read exactly `es` bytes and reinterpret the zero-extended
+# bits. A slot at least as wide as the float holds its bits in the low bytes (LE).
+def read_slot_f16(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Float16:
+    if es >= 2:
+        return read_f16(buf, sp)
+    return Float16(from_bits=UInt16(read_rel_offset_u(buf, sp, es)))
+
+
+def read_slot_bf16(buf: Span[UInt8, _], sp: Int, es: Int) raises -> BFloat16:
+    if es >= 2:
+        return read_bf16(buf, sp)
+    return BFloat16(from_bits=UInt16(read_rel_offset_u(buf, sp, es)))
+
+
+def read_slot_f32(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Float32:
+    if es >= 4:
+        return read_f32(buf, sp)
+    return Float32(from_bits=UInt32(read_rel_offset_u(buf, sp, es)))
+
+
+def read_slot_f64(buf: Span[UInt8, _], sp: Int, es: Int) raises -> Float64:
+    if es >= 8:
+        return read_f64(buf, sp)
+    return Float64(from_bits=UInt64(read_rel_offset_u(buf, sp, es)))
 
 
 # Pointer-table utf8 array (regular/frozen): `[LEB (count<<2)|wc][count × es-byte
@@ -1171,3 +1288,81 @@ def root_offset(buf: Span[UInt8, _]) raises -> Int:
     if (framing & 1) != 0:
         raise Error("missingHeader")
     return hdr_bytes + Int(framing >> 2)
+
+
+# ── spec/49 U1: text a restore keeps is well-formed UTF-8 ──────────────────────────
+# The lazy getters return the bytes (`read_utf8` is a view, U3); every restore and sink
+# record decode checks what it keeps (RFC 3629: no overlong form, no surrogate, nothing
+# above U+10FFFF, no sequence cut short) and raises "DagrError: invalidUtf8".
+def valid_utf8(b: Span[UInt8, _]) -> Bool:
+    var n = len(b)
+    var i = 0
+    while i < n:
+        var c = b[i]
+        if c < 0x80:
+            i += 1
+            continue
+        var ln = 0
+        var lo = UInt8(0x80)
+        var hi = UInt8(0xBF)
+        if c >= 0xC2 and c <= 0xDF:
+            ln = 2
+        elif c >= 0xE0 and c <= 0xEF:
+            ln = 3
+            if c == 0xE0:
+                lo = 0xA0      # no overlong 3-byte form
+            if c == 0xED:
+                hi = 0x9F      # no surrogate
+        elif c >= 0xF0 and c <= 0xF4:
+            ln = 4
+            if c == 0xF0:
+                lo = 0x90      # no overlong 4-byte form
+            if c == 0xF4:
+                hi = 0x8F      # nothing above U+10FFFF
+        else:
+            return False
+        if n - i < ln:
+            return False
+        if b[i + 1] < lo or b[i + 1] > hi:
+            return False
+        for k in range(2, ln):
+            if b[i + k] < 0x80 or b[i + k] > 0xBF:
+                return False
+        i += ln
+    return True
+
+
+def checked_text(var s: String) raises -> String:
+    if not valid_utf8(s.as_bytes()):
+        raise Error("DagrError: invalidUtf8")
+    return s^
+
+
+def check_text(s: String) raises:
+    if not valid_utf8(s.as_bytes()):
+        raise Error("DagrError: invalidUtf8")
+
+
+def check_text(s: Optional[String]) raises:
+    if s:
+        check_text(s.value())
+
+
+def check_text(l: List[String]) raises:
+    for k in range(len(l)):
+        check_text(l[k])
+
+
+def check_text(l: List[Optional[String]]) raises:
+    for k in range(len(l)):
+        check_text(l[k])
+
+
+def check_text(l: Optional[List[String]]) raises:
+    if l:
+        check_text(l.value())
+
+
+def check_text(l: Optional[List[Optional[String]]]) raises:
+    if l:
+        check_text(l.value())

@@ -1,8 +1,8 @@
-# Dagr serializer runtime (plan 26 Phase 4) — a faithful port of the TS `Builder`
-# (RethinkingDagrTS/src/dagr_writer.ts), itself a port of Swift's DataArenaBuilder.
+# Dagr serializer runtime (plan 28 Phase 4) — a faithful port of the TS `Builder`
+# (targets/typescript/src/dagr_writer.ts), itself a port of Swift's DataArenaBuilder.
 #
 # A BACKWARD-growing builder over a SINGLE contiguous buffer (the Rust `DagrBuilder`
-# model — see `30 Performance Optimization Notes.md` §1.11): the wire lives in the
+# model — see `spec/32-performance-optimization-notes.md` §1.11): the wire lives in the
 # tail slice `_buf[_cap - cursor .. _cap]` and every store PREPENDS its bytes at the
 # head (`_buf[_cap - cursor - n ..]`), decrementing the head and growing `cursor` by
 # `n`. Writing in place (no per-store `List` allocation) is byte-identical to the old
@@ -24,6 +24,7 @@
 # Gate: serialize(restore(fixture)) must equal the fixture byte-for-byte.
 
 from std.collections import Dict, Set
+from std.io.file import FileHandle
 from std.memory import unsafe_memcpy, unsafe_memcmp, unsafe_memset_zero
 from std.hashlib import Hasher
 from std.bit import bit_width
@@ -164,7 +165,7 @@ struct _LateBind(Copyable, Movable, ImplicitlyCopyable):
 # vtable fits — one code path, no runtime fallback.
 @fieldwise_init
 struct _VtKey[VT_MAX: Int](Copyable, Movable, Hashable, Equatable):
-    var vals: InlineArray[UInt16, Self.VT_MAX]  # normalized slot values [0..n); tail unused
+    var vals: Array[UInt16, Self.VT_MAX]  # normalized slot values [0..n); tail unused
     var n: Int                                # field count
     var is16: Bool
     var h: UInt64                             # precomputed content hash (folded once)
@@ -180,7 +181,7 @@ struct _VtKey[VT_MAX: Int](Copyable, Movable, Hashable, Equatable):
         return not (self == other)
 
     def __hash__[H: Hasher](self, mut hasher: H):
-        hasher.update(self.h)
+        hasher.update(self.h.as_bytes())
 
 
 struct Builder[VT_MAX: Int = 32](Movable):
@@ -196,6 +197,11 @@ struct Builder[VT_MAX: Int = 32](Movable):
     var _ref_pool: List[List[NodeStoreRef]]  # recycled node-ref-array scratch (§1.21)
     var _int_pool: List[List[Int]]           # recycled ptr-table offset scratch
     var _byte_pool: List[List[UInt8]]        # recycled frozen-packed bitset scratch (§1.32)
+    # Bytes that will PRECEDE the finished buffer in whatever carries it (spec 12 §14):
+    # finish padding aligns `alignment_offset + total length`, so the aligned arrays land
+    # on their boundary in the ENVELOPE's frame. Configuration, like `max_size` — not
+    # per-record state, so `reset()` keeps it. 0 = the buffer stands alone.
+    var alignment_offset: Int
 
     # `hint` = expected node count (a whole-graph build passes it; a per-record sink
     # writer leaves it 0). Pre-sizing the dedup/cycle maps to the node count avoids the
@@ -236,6 +242,7 @@ struct Builder[VT_MAX: Int = 32](Movable):
         self._ref_pool = List[List[NodeStoreRef]]()
         self._int_pool = List[List[Int]]()
         self._byte_pool = List[List[UInt8]]()
+        self.alignment_offset = 0
 
     # ── scratch pools (§1.21): recycle the per-array `List`s the store walk builds and
     # discards, so a whole-graph encode allocates them ~once (grows to max array-nesting
@@ -297,13 +304,22 @@ struct Builder[VT_MAX: Int = 32](Movable):
     # Rewind for reuse on another independent record (a DataSink streaming writer):
     # keep the buffer allocation, clear the dedup / cycle caches so each record dedups
     # only within itself — byte-identical to a fresh Builder, but no per-record alloc.
+    # Only non-empty tables are cleared: `clear()` re-initializes a table even when it is
+    # empty, ~88 ns for all five — more than encoding a small record (a direct-builder /
+    # packed record never touches most of them). `alignment_offset` is configuration,
+    # not record state — it survives the reset (spec 12 §14).
     def reset(mut self):
         self.cursor = 0
-        self._vt_lookup.clear()
-        self._string_lookup.clear()
-        self.struct_lookup.clear()
-        self._in_progress.clear()
-        self._late.clear()
+        if len(self._vt_lookup) > 0:
+            self._vt_lookup.clear()
+        if len(self._string_lookup) > 0:
+            self._string_lookup.clear()
+        if len(self.struct_lookup) > 0:
+            self.struct_lookup.clear()
+        if len(self._in_progress) > 0:
+            self._in_progress.clear()
+        if len(self._late) > 0:
+            self._late.clear()
 
     # ── core stores (write in place at the head; return the new cursor) ─────────────
     def store_bytes(mut self, bytes: List[UInt8]) -> Int:
@@ -822,9 +838,17 @@ struct Builder[VT_MAX: Int = 32](Movable):
 
     # Packed int array (width ≥ 2): count-tag=(count<<2)|tag, tag 0 all-LEB / 1 all-raw
     # / 2 mixed (enc bitset). `vals` = UInt64(Int(v)) (sign-extended for signed).
-    def store_packed_int_array(mut self, vals: List[UInt64], width: Int, signed: Bool) raises -> Int:
+    # `raw` (a `>> raw` field, spec/39): no probe, every element `width` bytes, tag 1.
+    def store_packed_int_array(mut self, vals: List[UInt64], width: Int, signed: Bool, raw: Bool) raises -> Int:
         var before = self.cursor
         var n = len(vals)
+        if raw:
+            self._reserve(n * width)
+            var wc = self._wcw(width)
+            for i in range(n - 1, -1, -1):
+                _ = self._store_uint_wc[False](vals[i], wc)
+            _ = self.store_leb((UInt64(n) << 2) | UInt64(1))
+            return self.store_leb(UInt64(self.cursor - before))
         var enc = self._zeros((n + 7) >> 3)
         var raw_count = 0
         self._reserve(n * 8)                          # ≤ 8 bytes per element (leb or raw)
@@ -941,10 +965,19 @@ struct Builder[VT_MAX: Int = 32](Movable):
         return bs^
 
     # Packed arrayWithOptionals: compacted (only present elems), leading nil bitset.
+    # `raw` (spec/39): no probe, every present element `width` bytes, tag 1, no enc bitset.
     def store_packed_int_opt_array(mut self, vals: List[UInt64], present: List[Bool],
-                                   width: Int, signed: Bool) raises -> Int:
+                                   width: Int, signed: Bool, raw: Bool) raises -> Int:
         var before = self.cursor
         var n = len(vals)
+        if raw:
+            var wc = self._wcw(width)
+            for i in range(n - 1, -1, -1):
+                if present[i]:
+                    _ = self._store_uint_wc(vals[i], wc)
+            _ = self.store_bytes(self._nil_from_present(present))
+            _ = self.store_leb((UInt64(n) << 2) | UInt64(1))
+            return self.store_leb(UInt64(self.cursor - before))
         var enc = self._zeros((n + 7) >> 3)
         var raw_count = 0
         var pres_count = 0
@@ -1098,17 +1131,23 @@ struct Builder[VT_MAX: Int = 32](Movable):
             bytes.append(b[i])
         return self.store_aligned_bytes(bytes, N)
 
-    # Arena finish padding (§11 §4): zero bytes before the framing LEB so the total
-    # length (afterPad + framingLen) ≡ 0 mod maxN, making every aligned element base
-    # buffer-relative aligned. Brute-forces the smallest pad (framing LEB width depends
-    # on the padded distance). Call after the root node is stored, before framing.
+    # Arena finish padding (spec 12 §4, §14): zero bytes before the framing LEB so that
+    # `alignment_offset + total length` (afterPad + framingLen) ≡ 0 mod maxN, making every
+    # aligned element base aligned in the frame of whatever carries the buffer (offset 0:
+    # buffer-relative). The framing LEB's own width depends on the padded distance, hence
+    # the search — over `[0, 2·maxN)`: that range crosses at most one step of the framing
+    # length, so one side of the step holds maxN consecutive candidates and a solution
+    # always exists (the old bound, maxN, could straddle the step and find none — the
+    # buffer then went out unpadded, spec 42 §1). The smallest pad wins, so every buffer
+    # the old search padded is byte-identical. Call after the root node is stored, before
+    # framing.
     def store_finish_alignment_padding(mut self, root_offset: Int, max_n: Int):
         if max_n <= 1:
             return
-        for p in range(max_n):
+        for p in range(2 * max_n):
             var after_pad = self.cursor + p
             var framing_len = leb_length(UInt64((after_pad - root_offset) << 2))
-            if (after_pad + framing_len) % max_n == 0:
+            if (self.alignment_offset + after_pad + framing_len) % max_n == 0:
                 if p != 0:
                     _ = self.store_zeros(p)
                 return
@@ -1148,7 +1187,7 @@ struct Builder[VT_MAX: Int = 32](Movable):
         # Build the normalized slot values straight into a fixed-size stack key, folding
         # the content hash in the same pass (uninitialized tail is never read — __eq__ /
         # __hash__ only touch [0..n)).
-        var key = _VtKey[Self.VT_MAX](InlineArray[UInt16, Self.VT_MAX](uninitialized=True), nf, False, 0)
+        var key = _VtKey[Self.VT_MAX](Array[UInt16, Self.VT_MAX](uninitialized=True), nf, False, 0)
         var is16 = False
         var h = UInt64(1469598103934665603)
         for i in range(nf):
@@ -1201,3 +1240,303 @@ struct Builder[VT_MAX: Int = 32](Movable):
         out.resize(unsafe_uninit_length=oldn + self.cursor)   # new tail overwritten below
         unsafe_memcpy(dest=out.unsafe_ptr().unsafe_offset(oldn),
                src=self._buf.unsafe_ptr().unsafe_offset((len(self._buf)) - self.cursor), count=self.cursor)
+
+
+# ── A sink record written FORWARD ("spec/11-data-sink.md" §6.1) ──────────────────────
+# A record whose fields are all bounded scalars has a static size bound: its append writes
+# `[type id][size][fields]` front to back into one bounded room of the stream buffer
+# (`sink_room`) instead of a backward store per field and a copy. The fields start `lead`
+# bytes in — room for the type id and the size at their bound; `finish` puts both in front,
+# moving the fields up when the size is shorter than its bound, and, doubly linked, the
+# span (an RLEB) behind. Every method writes the bytes the backward `Builder` store the
+# generated `_store_{record}` makes for that field kind: change one, change both (gated by
+# `tests/schemas/sink_forward.py`, `gen_sink_forward_tests_mojo.py`).
+struct SinkForward:
+    var buf: Pointer[UInt8, MutUntrackedOrigin]
+    var fields: Int
+    var p: Int
+
+    @always_inline
+    def __init__(out self, buf: Pointer[UInt8, MutUntrackedOrigin], lead: Int):
+        self.buf = buf
+        self.fields = lead
+        self.p = lead
+
+    @always_inline
+    def leb(mut self, value: UInt64):
+        var x = value
+        while x >= 0x80:
+            self.buf[unsafe_offset=self.p] = UInt8(x & 0x7f) | 0x80
+            x >>= 7
+            self.p += 1
+        self.buf[unsafe_offset=self.p] = UInt8(x)
+        self.p += 1
+
+    # The low `W` bytes of `v`, little-endian.
+    @always_inline
+    def raw[W: Int](mut self, v: UInt64):
+        var at = self.buf.unsafe_offset(self.p)
+        comptime if W == 1:
+            at[] = UInt8(v & 0xff)
+        elif W == 2:
+            at.unsafe_bitcast[UInt16]().unsafe_store[alignment=1](UInt16(v & 0xffff))
+        elif W == 4:
+            at.unsafe_bitcast[UInt32]().unsafe_store[alignment=1](UInt32(v & 0xffffffff))
+        else:
+            at.unsafe_bitcast[UInt64]().unsafe_store[alignment=1](v)
+        self.p += W
+
+    @always_inline
+    def tagged_byte(mut self, tag: UInt64, v: UInt8):
+        self.leb(tag)
+        self.buf[unsafe_offset=self.p] = v
+        self.p += 1
+
+    # `[tag | 1][byte]` — u8, i8, bool and byte-wide enums.
+    @always_inline
+    def byte(mut self, v: UInt8, index: UInt64):
+        self.tagged_byte((index << 1) | 1, v)
+
+    # `[tag][payload]` of a u16..u64 field (an enum's raw value): a LEB when shorter than `W`
+    # bytes, unless `raw` (spec 39).
+    @always_inline
+    def uint[W: Int, raw: Bool = False](mut self, v: UInt64, index: UInt64):
+        comptime if not raw:
+            if leb_length(v) < W:
+                self.leb(index << 1)
+                self.leb(v)
+                return
+        self.leb((index << 1) | 1)
+        self.raw[W](v)
+
+    # `[tag][payload]` of an i16..i64 field: its ZigZag LEB when shorter than `W` bytes.
+    @always_inline
+    def int[W: Int, raw: Bool = False](mut self, v: Int64, index: UInt64):
+        comptime if not raw:
+            var zz = to_zigzag(Int(v))
+            if leb_length(zz) < W:
+                self.leb(index << 1)
+                self.leb(zz)
+                return
+        self.leb((index << 1) | 1)
+        self.raw[W](UInt64(v.cast[DType.uint64]()))
+
+    # A `raw` f32 / f64 field (spec 39): `[tag | 1][4 / 8 bytes]`.
+    @always_inline
+    def raw_f32(mut self, v: Float32, index: UInt64):
+        self.leb((index << 1) | 1)
+        self.raw[4](UInt64(v.to_bits()))
+
+    @always_inline
+    def raw_f64(mut self, v: Float64, index: UInt64):
+        self.leb((index << 1) | 1)
+        self.raw[8](UInt64(v.to_bits()))
+
+    # An f16 field — `Builder.store_packed_f16_scalar` behind its tag.
+    @always_inline
+    def f16(mut self, v: Float16, index: UInt64):
+        var bits = UInt16(v.to_bits())
+        if bits == 0 or bits == 0x8000:
+            return self.tagged_byte(index << 1, UInt8(bits >> 15))
+        if ((bits >> 10) & 0x1f) == 0x1f:
+            if (bits & 0x3ff) != 0:
+                return self.tagged_byte(index << 1, 0x04)
+            return self.tagged_byte(index << 1, UInt8(0x03) if (bits >> 15) != 0 else UInt8(0x02))
+        self.leb((index << 1) | 1)
+        self.raw[2](UInt64(bits))
+
+    # A bf16 field — `Builder.store_packed_bf16_scalar` behind its tag.
+    @always_inline
+    def bf16(mut self, v: BFloat16, index: UInt64):
+        var bits = UInt16(v.to_bits())
+        if bits == 0 or bits == 0x8000:
+            return self.tagged_byte(index << 1, UInt8(bits >> 15))
+        if ((bits >> 7) & 0xff) == 0xff:
+            if (bits & 0x7f) != 0:
+                return self.tagged_byte(index << 1, 0x04)
+            return self.tagged_byte(index << 1, UInt8(0x03) if (bits >> 15) != 0 else UInt8(0x02))
+        self.leb((index << 1) | 1)
+        self.raw[2](UInt64(bits))
+
+    # An f32 field — `Builder.store_packed_float32(v, False)` behind its tag.
+    @always_inline
+    def f32(mut self, v: Float32, index: UInt64):
+        var bits = UInt32(v.to_bits())
+        if (bits << 1) == 0:
+            return self.tagged_byte(index << 1, UInt8(bits >> 31))
+        if ((bits >> 23) & 0xff) == 0xff:
+            if (bits & 0x7fffff) != 0:
+                return self.tagged_byte(index << 1, 0x04)
+            return self.tagged_byte(index << 1, UInt8(0x03) if (bits >> 31) != 0 else UInt8(0x02))
+        var av = -v if v < 0 else v
+        if av < Float32(1 << 21) and v == Float32(Int(v)):
+            var zz = to_zigzag(Int(v))
+            if leb_length(zz) <= 3:
+                self.tagged_byte(index << 1, 0x05)
+                return self.leb(zz)
+        if (bits & 0x1fff) == 0:
+            var h = v.cast[DType.float16]()
+            if h.cast[DType.float32]() == v:
+                self.tagged_byte(index << 1, 0x06)
+                return self.raw[2](UInt64(h.to_bits()))
+        self.leb((index << 1) | 1)
+        self.raw[4](UInt64(bits))
+
+    # An f64 field — `Builder.store_packed_float64(v, False)` behind its tag.
+    @always_inline
+    def f64(mut self, v: Float64, index: UInt64):
+        var bits = UInt64(v.to_bits())
+        if (bits << 1) == 0:
+            return self.tagged_byte(index << 1, UInt8(bits >> 63))
+        if ((bits >> 52) & 0x7ff) == 0x7ff:
+            if (bits & 0xfffffffffffff) != 0:
+                return self.tagged_byte(index << 1, 0x04)
+            return self.tagged_byte(index << 1, UInt8(0x03) if (bits >> 63) != 0 else UInt8(0x02))
+        var av = -v if v < 0 else v
+        if av < Float64(1 << 48) and v == Float64(Int(v)):
+            var zz = to_zigzag(Int(v))
+            if leb_length(zz) <= 7:
+                self.tagged_byte(index << 1, 0x05)
+                return self.leb(zz)
+        var f32 = v.cast[DType.float32]()
+        if f32.cast[DType.float64]() == v:
+            if (UInt32(f32.to_bits()) & 0x1fff) == 0:
+                var h = f32.cast[DType.float16]()
+                if h.cast[DType.float32]() == f32:
+                    self.tagged_byte(index << 1, 0x06)
+                    return self.raw[2](UInt64(h.to_bits()))
+            self.tagged_byte(index << 1, 0x07)
+            return self.raw[4](UInt64(f32.to_bits()))
+        self.leb((index << 1) | 1)
+        self.raw[8](bits)
+
+    # Puts `[type id][size]` in front of the fields — which move up when the size is
+    # shorter than its bound — and, doubly linked, the span (an RLEB) behind. Returns the
+    # record's length.
+    @always_inline
+    def finish(mut self, type_id: UInt64, doubly_linked: Bool) -> Int:
+        var body = self.p - self.fields
+        var src = self.fields
+        self.p = 0
+        self.leb(type_id)
+        self.leb(UInt64(body))
+        var q = self.p
+        if q != src:                     # q < src: an ascending copy never overwrites its source
+            for i in range(body):
+                self.buf[unsafe_offset=q + i] = self.buf[unsafe_offset=src + i]
+        var end = q + body
+        if doubly_linked:
+            var n = leb_length(UInt64(end))
+            var x = UInt64(end)
+            # RLEB: the LEB bytes reversed — the terminator (high bit clear) leads
+            self.buf[unsafe_offset=end] = UInt8(x >> UInt64(7 * (n - 1))) & 0x7f
+            for i in range(1, n):
+                self.buf[unsafe_offset=end + i] = UInt8((x >> UInt64(7 * (n - 1 - i))) & 0x7f) | 0x80
+            end += n
+        return end
+
+
+# Room for `n` more bytes at the end of `out`, which grows by `n` (uninitialized) — with
+# capacity reserved geometrically, since `List.resize` reserves exactly the new length.
+# Cut it back with `out.shrink(start + written)`.
+@always_inline
+def sink_room(mut out: List[UInt8], n: Int) -> Pointer[UInt8, MutUntrackedOrigin]:
+    var start = len(out)
+    if start + n > out.capacity():
+        out.reserve(max(start + n, 2 * out.capacity()))
+    out.resize(unsafe_uninit_length=start + n)
+    return out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]().unsafe_offset(start)
+
+
+# ── DataSink write destinations ("spec/11-data-sink.md" §5) ─────────────────────────────
+# The seam a generated `{Sink}StreamWriter[D]` writes through: each record is built in
+# the writer's scratch buffer and handed to `write` in ONE call (all-or-nothing from the
+# writer's view), so a destination never sees a partial record. The Mojo mirror of the
+# Swift `SinkDestination` protocol and the Rust `SinkOut` trait. `Movable & Deinitable`
+# lets a generic writer own the destination as a field.
+trait SinkDestination(Movable, Deinitable):
+    def write(mut self, bytes: Span[UInt8, _]) raises:
+        """Append `bytes` (one whole record, or the framing prefix) to the destination."""
+        ...
+
+    def flush(mut self) raises:
+        """Push any buffered bytes toward the underlying sink (no-op when unbuffered)."""
+        ...
+
+
+struct BufferDestination(Defaultable, SinkDestination):
+    """Accumulates the stream in memory — tests and in-process transfer."""
+    var buffer: List[UInt8]
+
+    def __init__(out self):
+        self.buffer = List[UInt8]()
+
+    def write(mut self, bytes: Span[UInt8, _]) raises:
+        self.buffer.extend(bytes)
+
+    def flush(mut self) raises:
+        pass
+
+
+struct FileDestination(SinkDestination):
+    """Appends each write straight to an open file — no in-memory accumulation.
+
+    `write` issues one `write_bytes` per record, so completed records are in the file
+    even if the process dies before `close()`. `flush` is a no-op: the Mojo `FileHandle`
+    does no user-space buffering and exposes no fsync."""
+    var file: FileHandle
+
+    def __init__(out self, var file: FileHandle):
+        self.file = file^
+
+    def write(mut self, bytes: Span[UInt8, _]) raises:
+        self.file.write_bytes(bytes)
+
+    def flush(mut self) raises:
+        pass
+
+    def close(mut self) raises:
+        self.file.close()
+
+
+struct BufferedFileDestination(SinkDestination):
+    """Batches writes to an open file: bytes accumulate in memory and go to the file in
+    one `write_bytes` when the next write would exceed `capacity`, so a stream of small
+    records costs one system call per ~`capacity` bytes instead of one per record.
+
+    A record is never split across system calls: a write that does not fit drains the
+    buffer first, and a write of at least `capacity` bytes goes straight to the file.
+    `capacity <= 1` therefore behaves like `FileDestination`.
+
+    Durability trade-off: up to `capacity` bytes of already-appended records live only in
+    memory until `flush()` or `close()`, and are lost if the process dies first. The
+    buffer is NOT drained on destruction (a destructor cannot raise), so call `close()`."""
+    var file: FileHandle
+    var buffer: List[UInt8]
+    var capacity: Int
+
+    def __init__(out self, var file: FileHandle, capacity: Int = 65536):
+        self.file = file^
+        self.capacity = capacity
+        self.buffer = List[UInt8](capacity=max(capacity, 0))
+
+    def _drain(mut self) raises:
+        if len(self.buffer) > 0:
+            self.file.write_bytes(Span(self.buffer))
+            self.buffer.clear()
+
+    def write(mut self, bytes: Span[UInt8, _]) raises:
+        if len(self.buffer) + len(bytes) > self.capacity:
+            self._drain()
+            if len(bytes) >= self.capacity:
+                self.file.write_bytes(bytes)
+                return
+        self.buffer.extend(bytes)
+
+    def flush(mut self) raises:
+        """Write the buffered bytes to the file (still no fsync)."""
+        self._drain()
+
+    def close(mut self) raises:
+        self._drain()
+        self.file.close()

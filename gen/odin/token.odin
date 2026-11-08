@@ -60,9 +60,10 @@ json_packed_object_get :: proc(v: Json_PackedView, i: int) -> JsonMember_Accesso
 	_, ablb := dr.read_leb(v.buf, v.vp)
 	c := v.vp + ablb
 	cnt, hb := dr.read_leb(v.buf, c)
-	_ = cnt
 	p := c + hb
-	for j := 0; j < i; j += 1 { p = dr.skip_blob(v.buf, p) }
+	for j := 0; j < i; j += 1 {
+		p = dr.skip_blob(v.buf, p)
+	}
 	return JsonMember_Accessor{buf = v.buf, pos = p}
 }
 json_packed_data :: proc(v: Json_PackedView) -> []u8 {
@@ -77,11 +78,11 @@ json_packed_arr_get :: proc(v: Json_PackedArrayView, i: int) -> Maybe(Json_Packe
 	ci := i
 	present := v.count
 	if v.nil_base >= 0 {
-		if (v.buf[v.nil_base + (i >> 3)] >> u8(i & 7)) & 1 == 1 { return nil }
+		if (dr.byte_at(v.buf, v.nil_base + (i >> 3)) >> u8(i & 7)) & 1 == 1 { return nil }
 		ci = 0
 		present = 0
 		for j := 0; j < v.count; j += 1 {
-			if (v.buf[v.nil_base + (j >> 3)] >> u8(j & 7)) & 1 == 0 {
+			if (dr.byte_at(v.buf, v.nil_base + (j >> 3)) >> u8(j & 7)) & 1 == 0 {
 				if j < i { ci += 1 }
 				present += 1
 			}
@@ -98,6 +99,32 @@ json_packed_arr_get :: proc(v: Json_PackedArrayView, i: int) -> Maybe(Json_Packe
 	}
 	hi, _ := dr.read_leb(v.buf, hj)
 	return Json_PackedView{buf = v.buf, vp = pp, tag = u8((hi >> 3) & 0xFF), code = u8(hi & 7)}
+}
+
+Json_PackedArrayIter :: struct { v: Json_PackedArrayView, i: int, hj: int, pp: int }
+json_packed_arr_iter :: proc(v: Json_PackedArrayView) -> Json_PackedArrayIter {
+	present := v.count
+	if v.nil_base >= 0 {
+		present = 0
+		for j := 0; j < v.count; j += 1 {
+			if (dr.byte_at(v.buf, v.nil_base + (j >> 3)) >> u8(j & 7)) & 1 == 0 { present += 1 }
+		}
+	}
+	hp := v.headers_start
+	for _ in 0 ..< present { _, b := dr.read_leb(v.buf, hp); hp += b }
+	return Json_PackedArrayIter{v = v, hj = v.headers_start, pp = hp}
+}
+json_packed_arr_next :: proc(it: ^Json_PackedArrayIter) -> (Maybe(Json_PackedView), bool) {
+	if it.i >= it.v.count { return nil, false }
+	i := it.i
+	it.i += 1
+	if it.v.nil_base >= 0 && (dr.byte_at(it.v.buf, it.v.nil_base + (i >> 3)) >> u8(i & 7)) & 1 == 1 { return nil, true }
+	hi, b := dr.read_leb(it.v.buf, it.hj)
+	it.hj += b
+	code := int(hi) & 7
+	view := Json_PackedView{buf = it.v.buf, vp = it.pp, tag = u8((hi >> 3) & 0xFF), code = u8(code)}
+	it.pp += dr.packed_union_payload_bytes(it.v.buf, it.pp, code)
+	return view, true
 }
 
 Claims_Accessor :: struct { buf: []u8, pos: int }
@@ -230,12 +257,52 @@ claims_scopes_get :: proc(acc: Claims_Accessor, i: int, blk := Claims_Block{}) -
 	pl := b._p5
 	_, blb := dr.read_leb(acc.buf, pl)
 	c := pl + blb
-	_, hb := dr.read_leb(acc.buf, c)
+	cnt, hb := dr.read_leb(acc.buf, c)
 	p := c + hb
-	for j := 0; j < i; j += 1 { p = dr.skip_blob(acc.buf, p) }
+	for j := 0; j < i; j += 1 {
+		p = dr.skip_blob(acc.buf, p)
+	}
 	s, _ := dr.read_utf8(acc.buf, p)
 	return s
 }
+Claims_Scopes_Iter :: struct {
+	acc: Claims_Accessor,
+	i: int,
+	n: int,
+	p: int,
+}
+
+claims_scopes_iter :: proc(acc: Claims_Accessor, blk := Claims_Block{}) -> Claims_Scopes_Iter {
+	it := Claims_Scopes_Iter{acc = acc}
+	b := blk
+	if !b.ready { b = claims_block(acc) }
+	pl := b._p5
+	if pl < 0 { return it }
+	_, blb := dr.read_leb(acc.buf, pl)
+	c := pl + blb
+	cnt, hb := dr.read_leb(acc.buf, c)
+	p := c + hb
+	it.n = int(cnt)
+	it.p = p
+	return it
+}
+
+_claims_scopes_at :: proc(acc: Claims_Accessor, i: int, p: int) -> string {
+	s, _ := dr.read_utf8(acc.buf, p)
+	return s
+}
+
+claims_scopes_next :: proc(it: ^Claims_Scopes_Iter) -> (string, bool) {
+	if it.i >= it.n { return {}, false }
+	v := _claims_scopes_at(it.acc, it.i, it.p)
+	acc := it.acc
+	p := it.p
+	p = dr.skip_blob(acc.buf, p)
+	it.p = p
+	it.i += 1
+	return v, true
+}
+
 claims_custom :: proc(acc: Claims_Accessor, blk := Claims_Block{}) -> Maybe(Json_PackedView) {
 	b := blk
 	if !b.ready { b = claims_block(acc) }
@@ -289,7 +356,18 @@ json_member_value :: proc(acc: JsonMember_Accessor, blk := JsonMember_Block{}) -
 
 Claims_Value :: struct { subject: Maybe(string), issuer: Maybe(string), audience: Maybe(string), issued_at: u64, expires_at: u64, scopes: Maybe([]string), custom: Maybe(Json_Value), _src: int }
 JsonMember_Value :: struct { key: string, value: Maybe(Json_Value), _src: int }
-Json_Value :: struct { tag: Json_Tag, string: Maybe(string), number: Maybe(f64), bool: Maybe(bool), array: Maybe([]Maybe(Json_Value)), object: Maybe([]JsonMember_Value), data: Maybe([]u8) }
+Json_Value :: struct { tag: Json_Tag, string: Maybe(string), number: Maybe(f64), bool: Maybe(bool), array: Maybe([]Maybe(^Json_Value)), object: Maybe([]JsonMember_Value), data: Maybe([]u8) }
+union_json_is_empty :: proc(uv: Json_Value) -> bool {
+	switch uv.tag {
+	case .string: return uv.string == nil
+	case .number: return uv.number == nil
+	case .bool: return uv.bool == nil
+	case .array: return uv.array == nil
+	case .object: return uv.object == nil
+	case .data: return uv.data == nil
+	}
+	return true
+}
 apply_union_packed_json :: proc(b: ^dr.Builder, uv: Json_Value) -> u64 {
 	switch uv.tag {
 	case .string:
@@ -307,7 +385,7 @@ apply_union_packed_json :: proc(b: ^dr.Builder, uv: Json_Value) -> u64 {
 		_ph3 := make([dynamic]u64); defer delete(_ph3)
 		_pp3 := make([dynamic]bool); defer delete(_pp3)
 		for _k3 := len(_pa3) - 1; _k3 >= 0; _k3 -= 1 {
-			if _e3, _ok3 := _pa3[_k3].?; _ok3 { append(&_ph3, apply_union_packed_json(b, _e3)); append(&_pp3, true) }
+			if _e3, _ok3 := _pa3[_k3].?; _ok3 { append(&_ph3, apply_union_packed_json(b, _e3^)); append(&_pp3, true) }
 			else { append(&_ph3, 0); append(&_pp3, false) }
 		}
 		_ = dr.store_packed_union_array_frame(b, _ph3[:], _pp3[:], len(_pa3), true, _pcb3)
@@ -331,6 +409,8 @@ store_union_packed_json :: proc(b: ^dr.Builder, uv: Json_Value) -> int {
 	return dr.store_leb(b, apply_union_packed_json(b, uv))
 }
 restore_union_json_pk :: proc(v: Json_PackedView) -> Json_Value {
+	if !dr.depth_enter() { return {} }
+	defer dr.depth_leave()
 	uv: Json_Value
 	uv.tag = json_packed_view_tag(v)
 	switch uv.tag {
@@ -342,8 +422,8 @@ restore_union_json_pk :: proc(v: Json_PackedView) -> Json_Value {
 		uv.bool = json_packed_bool(v)
 	case .array:
 		{ _an3 := json_packed_array_len(v)
-		_aa3 := make([]Maybe(Json_Value), _an3)
-		for _ai3 in 0 ..< _an3 { if _o3, _ok3 := json_packed_array_get(v, _ai3).?; _ok3 { _aa3[_ai3] = restore_union_json_pk(_o3) } }
+		_aa3 := make([]Maybe(^Json_Value), _an3)
+		for _ai3 in 0 ..< _an3 { if _o3, _ok3 := json_packed_array_get(v, _ai3).?; _ok3 { _aa3[_ai3] = new_clone(restore_union_json_pk(_o3)) } }
 		uv.array = _aa3 }
 	case .object:
 		{ _an4 := json_packed_object_len(v)
@@ -357,6 +437,8 @@ restore_union_json_pk :: proc(v: Json_PackedView) -> Json_Value {
 }
 
 restore_claims :: proc(acc: Claims_Accessor) -> Claims_Value {
+	if !dr.depth_enter() { return {} }
+	defer dr.depth_leave()
 	v: Claims_Value
 	v._src = acc.pos
 	v.subject = claims_subject(acc)
@@ -366,8 +448,10 @@ restore_claims :: proc(acc: Claims_Accessor) -> Claims_Value {
 	v.expires_at = claims_expires_at(acc)
 	if _n5, _okn5 := claims_scopes_len(acc).?; _okn5 {
 		_a5 := make([]string, _n5)
+		_it5 := claims_scopes_iter(acc)
 		for _i5 in 0 ..< _n5 {
-		_a5[_i5] = claims_scopes_get(acc, _i5)
+			_e5, _ := claims_scopes_next(&_it5)
+		_a5[_i5] = _e5
 		}
 		v.scopes = _a5
 	}
@@ -389,6 +473,7 @@ store_claims :: proc(b: ^dr.Builder, v: Claims_Value) -> int {
 	_pr6 := false
 	if _, _okp6 := v.custom.?; _okp6 { _pr6 = true }
 	if val6, ok6 := v.custom.?; ok6 {
+		if union_json_is_empty(val6) { panic("stale reference: a required union field holds a deleted node") }
 		_ = store_union_packed_json(b, val6)
 	}
 	if val5, ok5 := v.scopes.?; ok5 {
@@ -430,6 +515,8 @@ store_claims :: proc(b: ^dr.Builder, v: Claims_Value) -> int {
 }
 
 restore_json_member :: proc(acc: JsonMember_Accessor) -> JsonMember_Value {
+	if !dr.depth_enter() { return {} }
+	defer dr.depth_leave()
 	v: JsonMember_Value
 	v._src = acc.pos
 	v.key = json_member_key(acc)
@@ -443,6 +530,7 @@ store_json_member :: proc(b: ^dr.Builder, v: JsonMember_Value) -> int {
 	_pr1 := false
 	if _, _okp1 := v.value.?; _okp1 { _pr1 = true }
 	if val1, ok1 := v.value.?; ok1 {
+		if union_json_is_empty(val1) { panic("stale reference: a required union field holds a deleted node") }
 		_ = store_union_packed_json(b, val1)
 	}
 	_ = dr.store_utf8(b, v.key, false)
@@ -455,7 +543,7 @@ store_json_member :: proc(b: ^dr.Builder, v: JsonMember_Value) -> int {
 	return _o
 }
 
-// ── Spec 14 header Jws: flat packed self-sized envelope (no typeId) ──
+// ── Spec 15 header Jws: flat packed self-sized envelope (no typeId) ──
 Jws_Accessor :: struct { buf: []u8, pos: int }
 Jws_Block :: struct { _p0: int, _p1: int, _p2: int, raw: u64, ready: bool }
 jws_block :: proc(acc: Jws_Accessor) -> Jws_Block {
@@ -536,6 +624,8 @@ store_jws_packed :: proc(b: ^dr.Builder, v: Jws_Value) -> int {
 	return _o
 }
 restore_jws :: proc(acc: Jws_Accessor) -> Jws_Value {
+	if !dr.depth_enter() { return {} }
+	defer dr.depth_leave()
 	v: Jws_Value
 	v._src = acc.pos
 	v.algorithm = jws_algorithm(acc)
@@ -545,18 +635,25 @@ restore_jws :: proc(acc: Jws_Accessor) -> Jws_Value {
 }
 
 claims_from_bytes :: proc(data: []u8) -> Claims_Value {
-	acc := Claims_Accessor{buf = data, pos = dr.root_offset(data)}
-	return restore_claims(acc)
+	v, _ := claims_from_bytes_ok(data)
+	return v
 }
-claims_to_bytes :: proc(v: Claims_Value) -> []u8 {
+claims_from_bytes_ok :: proc(data: []u8) -> (Claims_Value, bool) {
+	dr.depth_reset()
+	acc := Claims_Accessor{buf = data, pos = dr.root_offset(data)}
+	v := restore_claims(acc)
+	return v, dr.restore_end()
+}
+claims_to_bytes :: proc(v: Claims_Value, alignment_offset: int = 0) -> []u8 {
 	b := dr.builder_make()
 	defer dr.builder_destroy(&b)
+	b.alignment_offset = alignment_offset
 	off := store_claims(&b, v)
 	_ = dr.store_leb(&b, u64((b.cursor - off) << 2))   // framing (no header)
 	return dr.make_data(&b)
 }
 
-// ── Spec 14 customizable header: framing word (00|01) + verify-before-parse gate ──
+// ── Spec 15 customizable header: framing word (00|01) + verify-before-parse gate ──
 claims_to_bytes_with_header :: proc(v: Claims_Value, ctx: rawptr, header_fn: proc(ctx: rawptr, root_offset: int, body: []u8) -> Jws_Value) -> []u8 {
 	b := dr.builder_make()
 	defer dr.builder_destroy(&b)
@@ -597,9 +694,13 @@ claims_from_bytes_with_header :: proc(data: []u8, ctx: rawptr, gate: proc(ctx: r
 	return restore_claims(acc), true
 }
 
-// ── 31 Direct Graph Builder §4.3: reusable writer (one builder, reset per mint) ──
+// ── 33 Direct Graph Builder §4.3: reusable writer (one builder, reset per mint) ──
 Claims_Writer :: struct { _b: dr.Builder }
-claims_writer_make :: proc() -> Claims_Writer { return Claims_Writer{_b = dr.builder_make()} }
+claims_writer_make :: proc(alignment_offset: int = 0) -> Claims_Writer {
+	w := Claims_Writer{_b = dr.builder_make()}
+	w._b.alignment_offset = alignment_offset
+	return w
+}
 claims_writer_destroy :: proc(w: ^Claims_Writer) { dr.builder_destroy(&w._b) }
 claims_writer_to_bytes :: proc(w: ^Claims_Writer, v: Claims_Value) -> []u8 {
 	dr.builder_reset(&w._b)
@@ -608,6 +709,7 @@ claims_writer_to_bytes :: proc(w: ^Claims_Writer, v: Claims_Value) -> []u8 {
 	return dr.make_data(&w._b)
 }
 claims_writer_to_bytes_with_header :: proc(w: ^Claims_Writer, v: Claims_Value, ctx: rawptr, header_fn: proc(ctx: rawptr, root_offset: int, body: []u8) -> Jws_Value) -> []u8 {
+	assert(w._b.alignment_offset == 0, "alignment_offset with a customizable header is not supported (spec 42 §2.2)")
 	dr.builder_reset(&w._b)
 	off := store_claims(&w._b, v)
 	original_offset := w._b.cursor - off

@@ -95,7 +95,7 @@ func verify(_ token: Data, secret: Data, now: UInt64) -> Result<Token.ClaimsAcce
             }
         })
         if now >= (try c.expiresAt) { return .failure(.expired) }
-        if (try c.audience) != "dagr-api" { return .failure(.wrongAudience) }
+        if c.audience != "dagr-api" { return .failure(.wrongAudience) }
         return .success(c)
     } catch {
         return .failure(reason ?? .badSignature)

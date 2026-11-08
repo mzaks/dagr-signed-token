@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cross-language validation for dagr-signed-token.
 #
-# Uses the COMMITTED gen/ (this repo is self-contained). If the closed-source `dagr`
+# Uses the COMMITTED gen/ (this repo is self-contained). If the `dagr`
 # CLI happens to be on PATH it regenerates gen/ first; otherwise it just uses what's
 # committed. Then mints the token in each language, has every language verify every
 # language's token (N×N), and asserts the buffers are byte-for-byte identical.
@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
 if command -v dagr >/dev/null 2>&1; then
-  echo "== [gen] dagr build (closed-source CLI found — regenerating gen/) =="
+  echo "== [gen] dagr build (dagr CLI found — regenerating gen/) =="
   dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json"
 else
   echo "== [gen] using committed gen/ (dagr CLI not on PATH) =="
@@ -38,7 +38,10 @@ MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dst-mojo")
 
 echo "== [build] Odin =="
 # The example package imports the generated gen/odin package + its runtime sub-package.
-odin build examples/odin -out:examples/odin/dst-odin
+# -o:speed, as run_bench.sh: with Odin dev-2026-07, an unoptimized build (-o:none / -o:minimal)
+# writes the `custom` claim's later members empty (167 B instead of 207); every optimized level
+# (size, speed, aggressive) is byte-identical to the other languages.
+odin build examples/odin -out:examples/odin/dst-odin -o:speed
 ODIN=(./examples/odin/dst-odin)
 
 WORK="$(mktemp -d)"

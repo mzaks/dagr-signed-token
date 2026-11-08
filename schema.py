@@ -2,7 +2,7 @@
 
 A JWT is `header.payload.signature`: the signature is a MAC over the payload so a
 verifier can trust the claims *before* acting on them. This schema reproduces that
-with Dagr's customizable header ("14 Customizable Header.md"), Shape A:
+with Dagr's customizable header (spec 15, "Customizable Header"), Shape A:
 
   • the CLAIMS live in the graph BODY  (the "payload")
   • a packed HEADER node carries {algorithm, keyId, signature}  (the JOSE envelope)
@@ -12,8 +12,8 @@ with Dagr's customizable header ("14 Customizable Header.md"), Shape A:
 `dagr build` emits the reader/writer for every target below from this one file.
 Edit here, then run `dagr build`.
 """
-from dagr_dsl import t, required, timestamp, Node, UnionType, DataGraph
-from dagr_config import Library, Swift, Rust, TypeScript, Python, Mojo, Odin
+from dagr.dsl import t, required, timestamp, Node, UnionType, DataGraph
+from dagr.config import Library, Swift, Rust, TypeScript, Python, Mojo, Odin
 
 TOKEN = DataGraph(
     "Token",

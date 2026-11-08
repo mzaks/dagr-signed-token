@@ -169,6 +169,18 @@ public enum Token {
         public var arenaOfJsonMember: [JsonMemberValues] = []
         public init() {}
 
+        var _dagrDepth = 0
+        @inline(__always) func _dagrDepthEnter() throws {
+            guard _dagrDepth < 128 else { throw ArenaRestoreError.tooDeep }
+            _dagrDepth += 1
+        }
+        var _dagrPending: [(inout [Int: Int]) throws -> Void] = []
+        func _dagrDrain(cache: inout [Int: Int]) throws {
+            var i = 0
+            while i < _dagrPending.count { let fill = _dagrPending[i]; i += 1; try fill(&cache) }
+            _dagrPending.removeAll()
+        }
+
         private var _root: UInt64? = nil
         public var root: Claims<Arena<Brand>>? {
             get { _root.map { Claims(__packed: $0, __graph: self) } }
@@ -270,9 +282,9 @@ extension Token.Claims: CustomStringConvertible {
     }
 
     func buildDescription(visited: inout Set<NodeKey>) -> String {
-        let key = NodeKey(arena: _arenaId, typeId: Arena.claimsTypeId, index: __index)
-        guard !visited.contains(key) else { return "Claims@\(__index)" }
-        visited.insert(key)
+        let __nodeKey = NodeKey(arena: _arenaId, typeId: Arena.claimsTypeId, index: __index)
+        guard !visited.contains(__nodeKey) else { return "Claims@\(__index)" }
+        visited.insert(__nodeKey)
         let subjectStr = subject.map { "\"\($0)\"" } ?? "nil"
         let issuerStr = issuer.map { "\"\($0)\"" } ?? "nil"
         let audienceStr = audience.map { "\"\($0)\"" } ?? "nil"
@@ -299,9 +311,9 @@ extension Token.JsonMember: CustomStringConvertible {
     }
 
     func buildDescription(visited: inout Set<NodeKey>) -> String {
-        let key = NodeKey(arena: _arenaId, typeId: Arena.jsonMemberTypeId, index: __index)
-        guard !visited.contains(key) else { return "JsonMember@\(__index)" }
-        visited.insert(key)
+        let __nodeKey = NodeKey(arena: _arenaId, typeId: Arena.jsonMemberTypeId, index: __index)
+        guard !visited.contains(__nodeKey) else { return "JsonMember@\(__index)" }
+        visited.insert(__nodeKey)
         let keyStr = "\"\(key)\""
         let valueStr: String = value.map { item -> String in switch item {
         case .string(let v): return "string(\(v))"
@@ -323,9 +335,9 @@ extension Token.Claims: Hashable {
     }
 
     func hashInto(hasher: inout Hasher, visited: inout Set<NodeKey>) {
-        let key = NodeKey(arena: _arenaId, typeId: Arena.claimsTypeId, index: __index)
-        guard !visited.contains(key) else { return }
-        visited.insert(key)
+        let __nodeKey = NodeKey(arena: _arenaId, typeId: Arena.claimsTypeId, index: __index)
+        guard !visited.contains(__nodeKey) else { return }
+        visited.insert(__nodeKey)
         hasher.combine(subject)
         hasher.combine(issuer)
         hasher.combine(audience)
@@ -353,9 +365,9 @@ extension Token.JsonMember: Hashable {
     }
 
     func hashInto(hasher: inout Hasher, visited: inout Set<NodeKey>) {
-        let key = NodeKey(arena: _arenaId, typeId: Arena.jsonMemberTypeId, index: __index)
-        guard !visited.contains(key) else { return }
-        visited.insert(key)
+        let __nodeKey = NodeKey(arena: _arenaId, typeId: Arena.jsonMemberTypeId, index: __index)
+        guard !visited.contains(__nodeKey) else { return }
+        visited.insert(__nodeKey)
         hasher.combine(key)
         if let item = value {
             switch item {
@@ -794,6 +806,11 @@ extension Token {
         }
 
         public static func restore(from data: Foundation.Data, at start: Int) throws -> Jws {
+            try restore(from: data, at: start, depth: 0)
+        }
+        static func restore(from data: Foundation.Data, at start: Int, depth: Int) throws -> Jws {
+            guard depth < 128 else { throw ArenaRestoreError.tooDeep }
+            let _depth = depth + 1; _ = _depth
             var values = Jws()
             let (_bl, _blB) = try restoreLEB(from: data, at: start)
             var _cursor = start + _blB
@@ -804,7 +821,7 @@ extension Token {
                 if Int(_tag_algorithm) >> 1 == 0 {
                     _cursor += _tag_algorithmB
                     let (_sv_algorithm, _sb_algorithm) = try restoreLEB(from: data, at: _cursor); _cursor += _sb_algorithm
-                    values.algorithm = String(decoding: data[_cursor..<(_cursor + Int(_sv_algorithm))], as: UTF8.self); _cursor += Int(_sv_algorithm)
+                    values.algorithm = try _dagrStrictUTF8(data[_cursor..<(_cursor + Int(_sv_algorithm))]); _cursor += Int(_sv_algorithm)
                 }
             }
             if _cursor < _end {
@@ -812,7 +829,7 @@ extension Token {
                 if Int(_tag_keyId) >> 1 == 1 {
                     _cursor += _tag_keyIdB
                     let (_sv_keyId, _sb_keyId) = try restoreLEB(from: data, at: _cursor); _cursor += _sb_keyId
-                    values.keyId = String(decoding: data[_cursor..<(_cursor + Int(_sv_keyId))], as: UTF8.self); _cursor += Int(_sv_keyId)
+                    values.keyId = try _dagrStrictUTF8(data[_cursor..<(_cursor + Int(_sv_keyId))]); _cursor += Int(_sv_keyId)
                 }
             }
             if _cursor < _end {
@@ -865,11 +882,13 @@ extension Token.Arena {
         let rootStart = lebLen + storedOffset
         var cache = [Int: Int]()
         arena.root = try arena._restoreClaims(from: data, at: rootStart, cache: &cache)
+        try arena._dagrDrain(cache: &cache)
         return arena
     }
 
     private func _restoreClaims(from data: Foundation.Data, at start: Int, cache: inout [Int: Int]) throws -> Token.Claims<Token.Arena<Brand>> {
         if let idx = cache[start] { return Token.Claims(__packed: UInt64(idx), __graph: self) }
+        try _dagrDepthEnter(); defer { _dagrDepth -= 1 }   // a node value: one level (spec/48)
         let idx = arenaOfClaims.count
         cache[start] = idx
         arenaOfClaims.append(Token.ClaimsValues(issuedAt: 0, expiresAt: 0))
@@ -882,17 +901,17 @@ extension Token.Arena {
         _cur += 1
         if _obs0 & 1 != 0 {
             let (_sv_subject, _sb_subject) = try restoreLEB(from: data, at: _cur); _cur += _sb_subject
-            values.subject = String(decoding: data[_cur..<(_cur + Int(_sv_subject))], as: UTF8.self)
+            values.subject = try _dagrStrictUTF8(data[_cur..<(_cur + Int(_sv_subject))])
             _cur += Int(_sv_subject)
         }
         if _obs0 & 2 != 0 {
             let (_sv_issuer, _sb_issuer) = try restoreLEB(from: data, at: _cur); _cur += _sb_issuer
-            values.issuer = String(decoding: data[_cur..<(_cur + Int(_sv_issuer))], as: UTF8.self)
+            values.issuer = try _dagrStrictUTF8(data[_cur..<(_cur + Int(_sv_issuer))])
             _cur += Int(_sv_issuer)
         }
         if _obs0 & 4 != 0 {
             let (_sv_audience, _sb_audience) = try restoreLEB(from: data, at: _cur); _cur += _sb_audience
-            values.audience = String(decoding: data[_cur..<(_cur + Int(_sv_audience))], as: UTF8.self)
+            values.audience = try _dagrStrictUTF8(data[_cur..<(_cur + Int(_sv_audience))])
             _cur += Int(_sv_audience)
         }
         if _ebs0 & 1 != 0 {
@@ -910,7 +929,7 @@ extension Token.Arena {
         let (_bbl_scopes, _bblB_scopes) = try restoreLEB(from: data, at: _cur)
         let _bend_scopes = _cur + _bblB_scopes + Int(_bbl_scopes)
         _cur += _bblB_scopes
-        values.scopes = try _restorePackedComplexArray(from: data, at: _cur, { String(decoding: $0, as: UTF8.self) })
+        values.scopes = try _restorePackedComplexArray(from: data, at: _cur, { try _dagrStrictUTF8($0) })
         _cur = _bend_scopes
         if _obs0 & 16 != 0 {
             let (_hdr_custom, _hdrB_custom) = try restoreLEB(from: data, at: _cur)
@@ -918,6 +937,7 @@ extension Token.Arena {
             let _code_custom = Int(_hdr_custom & 7)
             var _vp_custom = _cur + _hdrB_custom
             var _tmp_custom = [Token._Json?]()
+            try _dagrDepthEnter()   // a union value: one level (spec/48)
             switch _tid_custom {
             case 0:
                 let (_bl_0, _blB_0) = try restoreLEB(from: data, at: _vp_custom)
@@ -954,6 +974,7 @@ extension Token.Arena {
                     let _utid_3 = _uhdr_3 >> 3
                     let _ucode_3 = Int(_uhdr_3 & 7)
                     var _utmp_3 = [Token._Json?]()
+                    try _dagrDepthEnter()   // each element is a union value: one level (spec/48)
                     switch _utid_3 {
                     case 0:
                         let (_bl_0, _blB_0) = try restoreLEB(from: data, at: _upp_3)
@@ -974,6 +995,8 @@ extension Token.Arena {
                         _upp_3 += 1
                     case 3:
                         let (_absz_3, _abszB_3) = try restoreLEB(from: data, at: _upp_3)
+                        let _ab_3 = _upp_3 + _abszB_3
+                        _utmp_3.append(.array(try _restorePackedUArrOptJson(from: data, at: _ab_3, cache: &cache)))
                         _upp_3 += _abszB_3 + Int(_absz_3)
                     case 4:
                         let (_absz_4, _abszB_4) = try restoreLEB(from: data, at: _upp_3)
@@ -994,6 +1017,7 @@ extension Token.Arena {
                         _upp_3 += _blB_5 + Int(_bl_5)
                     default: _utmp_3.append(.unknown(_utid_3))
                     }
+                    _dagrDepth -= 1
                     _uav_3.append(_utmp_3.first ?? nil)
                 }
                 _tmp_custom.append(.array(_uav_3))
@@ -1017,6 +1041,7 @@ extension Token.Arena {
                 _vp_custom += _blB_5 + Int(_bl_5)
             default: _tmp_custom.append(nil)
             }
+            _dagrDepth -= 1
             values.custom = _tmp_custom.first ?? nil
             _cur = _vp_custom
         }
@@ -1024,8 +1049,14 @@ extension Token.Arena {
         return Token.Claims(__packed: UInt64(idx), __graph: self)
     }
 
+    private func _restoreClaimsRef(from data: Foundation.Data, at start: Int, cache: inout [Int: Int]) throws -> Token.Claims<Token.Arena<Brand>> {
+        let outer = _dagrDepth; _dagrDepth = 0; defer { _dagrDepth = outer }
+        return try _restoreClaims(from: data, at: start, cache: &cache)
+    }
+
     private func _restoreJsonMember(from data: Foundation.Data, at start: Int, cache: inout [Int: Int]) throws -> Token.JsonMember<Token.Arena<Brand>> {
         if let idx = cache[start] { return Token.JsonMember(__packed: UInt64(idx), __graph: self) }
+        try _dagrDepthEnter(); defer { _dagrDepth -= 1 }   // a node value: one level (spec/48)
         let idx = arenaOfJsonMember.count
         cache[start] = idx
         arenaOfJsonMember.append(Token.JsonMemberValues(key: ""))
@@ -1035,7 +1066,7 @@ extension Token.Arena {
         let _obs0 = _cur + 0 < data.count ? data[_cur + 0] : UInt8(0)
         _cur += 1
         let (_sv_key, _sb_key) = try restoreLEB(from: data, at: _cur); _cur += _sb_key
-        values.key = String(decoding: data[_cur..<(_cur + Int(_sv_key))], as: UTF8.self)
+        values.key = try _dagrStrictUTF8(data[_cur..<(_cur + Int(_sv_key))])
         _cur += Int(_sv_key)
         if _obs0 & 1 != 0 {
             let (_hdr_value, _hdrB_value) = try restoreLEB(from: data, at: _cur)
@@ -1043,6 +1074,7 @@ extension Token.Arena {
             let _code_value = Int(_hdr_value & 7)
             var _vp_value = _cur + _hdrB_value
             var _tmp_value = [Token._Json?]()
+            try _dagrDepthEnter()   // a union value: one level (spec/48)
             switch _tid_value {
             case 0:
                 let (_bl_0, _blB_0) = try restoreLEB(from: data, at: _vp_value)
@@ -1079,6 +1111,7 @@ extension Token.Arena {
                     let _utid_3 = _uhdr_3 >> 3
                     let _ucode_3 = Int(_uhdr_3 & 7)
                     var _utmp_3 = [Token._Json?]()
+                    try _dagrDepthEnter()   // each element is a union value: one level (spec/48)
                     switch _utid_3 {
                     case 0:
                         let (_bl_0, _blB_0) = try restoreLEB(from: data, at: _upp_3)
@@ -1099,6 +1132,8 @@ extension Token.Arena {
                         _upp_3 += 1
                     case 3:
                         let (_absz_3, _abszB_3) = try restoreLEB(from: data, at: _upp_3)
+                        let _ab_3 = _upp_3 + _abszB_3
+                        _utmp_3.append(.array(try _restorePackedUArrOptJson(from: data, at: _ab_3, cache: &cache)))
                         _upp_3 += _abszB_3 + Int(_absz_3)
                     case 4:
                         let (_absz_4, _abszB_4) = try restoreLEB(from: data, at: _upp_3)
@@ -1119,6 +1154,7 @@ extension Token.Arena {
                         _upp_3 += _blB_5 + Int(_bl_5)
                     default: _utmp_3.append(.unknown(_utid_3))
                     }
+                    _dagrDepth -= 1
                     _uav_3.append(_utmp_3.first ?? nil)
                 }
                 _tmp_value.append(.array(_uav_3))
@@ -1142,11 +1178,17 @@ extension Token.Arena {
                 _vp_value += _blB_5 + Int(_bl_5)
             default: _tmp_value.append(nil)
             }
+            _dagrDepth -= 1
             values.value = _tmp_value.first ?? nil
             _cur = _vp_value
         }
         arenaOfJsonMember[idx] = values
         return Token.JsonMember(__packed: UInt64(idx), __graph: self)
+    }
+
+    private func _restoreJsonMemberRef(from data: Foundation.Data, at start: Int, cache: inout [Int: Int]) throws -> Token.JsonMember<Token.Arena<Brand>> {
+        let outer = _dagrDepth; _dagrDepth = 0; defer { _dagrDepth = outer }
+        return try _restoreJsonMember(from: data, at: start, cache: &cache)
     }
 
     private func _restoreJsonMemberNodeArray(from data: Foundation.Data, at pos: Int, cache: inout [Int: Int]) throws -> [UInt64] {
@@ -1159,7 +1201,7 @@ extension Token.Arena {
             let ep = pos + hl + k * es
             let ro = try readSignedRelOffset(from: data, at: ep, size: es)
             if ro == 0 { continue }
-            result.append(try _restoreJsonMember(from: data, at: base + Int(ro) - 1, cache: &cache).__packed)
+            result.append(try _restoreJsonMemberRef(from: data, at: base + Int(ro) - 1, cache: &cache).__packed)
         }
         return result
     }
@@ -1174,12 +1216,13 @@ extension Token.Arena {
             let ep = pos + hl + k * es
             let ro = try readSignedRelOffset(from: data, at: ep, size: es)
             if ro == 0 { result.append(nil); continue }
-            result.append(try _restoreJsonMember(from: data, at: base + Int(ro) - 1, cache: &cache).__packed)
+            result.append(try _restoreJsonMemberRef(from: data, at: base + Int(ro) - 1, cache: &cache).__packed)
         }
         return result
     }
 
     private func _restoreJsonStorage(from data: Foundation.Data, at pos: Int, cache: inout [Int: Int]) throws -> Token._Json? {
+        try _dagrDepthEnter(); defer { _dagrDepth -= 1 }   // a union value: one level (spec/48)
         let (hdr, tidBytes) = try restoreLEB(from: data, at: pos)
         let typeId = hdr >> 2
         let vPos = pos + tidBytes
@@ -1218,6 +1261,7 @@ extension Token.Arena {
             let ep = pos + hLen + tidLen + i * es
             let ro = try readRelOffset(from: data, at: ep, size: es)
             let typeId = UInt64((data[tidStart + i / 2] >> ((i % 2) * 4)) & 15)
+            try _dagrDepthEnter()   // each element is a union value: one level (spec/48)
             switch typeId {
             case 0:
                 result.append(.string(try String.restore(from: data, at: base + Int(ro))))
@@ -1233,6 +1277,7 @@ extension Token.Arena {
                 result.append(.data(try Foundation.Data.restore(from: data, at: base + Int(ro))))
             default: result.append(.unknown(typeId))
             }
+            _dagrDepth -= 1
         }
         return result
     }
@@ -1251,6 +1296,7 @@ extension Token.Arena {
             let ep = pos + hLen + tidLen + bsNilSize + i * es
             let ro = try readRelOffset(from: data, at: ep, size: es)
             let typeId = UInt64((data[tidStart + i / 2] >> ((i % 2) * 4)) & 15)
+            try _dagrDepthEnter()   // each element is a union value: one level (spec/48)
             switch typeId {
             case 0:
                 result.append(.string(try String.restore(from: data, at: base + Int(ro))))
@@ -1266,14 +1312,80 @@ extension Token.Arena {
                 result.append(.data(try Foundation.Data.restore(from: data, at: base + Int(ro))))
             default: result.append(.unknown(typeId))
             }
+            _dagrDepth -= 1
         }
         return result
+    }
+
+    private func _restorePackedUArrOptJson(from data: Foundation.Data, at pos: Int, cache: inout [Int: Int]) throws -> [Token._Json?] {
+        let (_uacnt_h, _uacntB_h) = try restoreLEB(from: data, at: pos)
+        var _uav_h = [Token._Json?]()
+        let _ubs_h = pos + _uacntB_h
+        var _uap_h = _ubs_h + (Int(_uacnt_h) + 7) / 8
+        let (_uhss_h, _uhssB_h) = try restoreLEB(from: data, at: _uap_h); _uap_h += _uhssB_h
+        let _uhend_h = _uap_h + Int(_uhss_h)
+        var _uhdrs_h = [UInt64](); while _uap_h < _uhend_h { let (_h, _hb) = try restoreLEB(from: data, at: _uap_h); _uhdrs_h.append(_h); _uap_h += _hb }
+        var _upp_h = _uap_h
+        var _uhi_h = 0
+        for _uei_h in 0..<Int(_uacnt_h) {
+            if (_ubs_h + _uei_h / 8 < data.count ? data[_ubs_h + _uei_h / 8] : 0) & UInt8(1 << (_uei_h % 8)) != 0 { _uav_h.append(nil); continue }
+            let _uhdr_h = _uhdrs_h[_uhi_h]; _uhi_h += 1
+            let _utid_h = _uhdr_h >> 3
+            let _ucode_h = Int(_uhdr_h & 7)
+            var _utmp_h = [Token._Json?]()
+            try _dagrDepthEnter()   // each element is a union value: one level (spec/48)
+            switch _utid_h {
+            case 0:
+                let (_bl_0, _blB_0) = try restoreLEB(from: data, at: _upp_h)
+                _utmp_h.append(.string(try String.restore(from: data, at: _upp_h)))
+                _upp_h += _blB_0 + Int(_bl_0)
+            case 1:
+                if _ucode_h == 5 {
+                    let (_fv_1, _fb_1) = try _decodePackedFloat64(from: data, at: _upp_h)
+                    _utmp_h.append(.number(_fv_1))
+                    _upp_h += _fb_1
+                } else {
+                    _utmp_h.append(.number(try Double.restore(from: data, at: _upp_h)))
+                    _upp_h += 8
+                }
+            case 2:
+                guard _upp_h >= 0, _upp_h < data.count else { throw ArenaRestoreError.outsideOfBuffer }
+                _utmp_h.append(.bool(data[_upp_h] != 0))
+                _upp_h += 1
+            case 3:
+                let (_absz_3, _abszB_3) = try restoreLEB(from: data, at: _upp_h)
+                let _ab_3 = _upp_h + _abszB_3
+                _utmp_h.append(.array(try _restorePackedUArrOptJson(from: data, at: _ab_3, cache: &cache)))
+                _upp_h += _abszB_3 + Int(_absz_3)
+            case 4:
+                let (_absz_4, _abszB_4) = try restoreLEB(from: data, at: _upp_h)
+                let _ab_4 = _upp_h + _abszB_4
+                let (_acnt_4, _acntB_4) = try restoreLEB(from: data, at: _ab_4)
+                var _ap_4 = _ab_4 + _acntB_4
+                var _av_4 = [UInt64]()
+                for _ in 0..<Int(_acnt_4) {
+                    let (_ebl_4, _eblB_4) = try restoreLEB(from: data, at: _ap_4)
+                    _av_4.append(try _restoreJsonMember(from: data, at: _ap_4, cache: &cache).__packed)
+                    _ap_4 += _eblB_4 + Int(_ebl_4)
+                }
+                _utmp_h.append(.object(_av_4))
+                _upp_h += _abszB_4 + Int(_absz_4)
+            case 5:
+                let (_bl_5, _blB_5) = try restoreLEB(from: data, at: _upp_h)
+                _utmp_h.append(.data(try Foundation.Data.restore(from: data, at: _upp_h)))
+                _upp_h += _blB_5 + Int(_bl_5)
+            default: _utmp_h.append(.unknown(_utid_h))
+            }
+            _dagrDepth -= 1
+            _uav_h.append(_utmp_h.first ?? nil)
+        }
+        return _uav_h
     }
 
 }
 
 
-// ── Direct Graph Builder ("31 Direct Graph Builder.md") ─────────────────────
+// ── Direct Graph Builder ("spec/33-direct-graph-builder.md") ─────────────────────
 // Arena-free construction for this packed-rooted tree: value structs in,
 // byte-identical graph buffer out. `Direct.toData*(v) == Arena.toData*()`.
 extension Token {

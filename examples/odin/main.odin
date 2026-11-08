@@ -58,10 +58,10 @@ mint :: proc(w: ^tok.Claims_Writer, secret: string, alg: string, exp: u64) -> []
 	// `[]T{...}` used inline in a larger expression is a temporary whose backing array
 	// does not outlive the statement, so a nested one would dangle before the writer walks
 	// it. Named vars live for this proc's scope (the whole `to_bytes_with_header` call).
-	roles := []Maybe(tok.Json_Value){
-		tok.Json_Value{tag = .string, string = "admin"},
-		tok.Json_Value{tag = .string, string = "billing"},
-	}
+	// array elements are pointers (`Maybe(^Json_Value)`), so the elements are named vars too
+	admin := tok.Json_Value{tag = .string, string = "admin"}
+	billing := tok.Json_Value{tag = .string, string = "billing"}
+	roles := []Maybe(^tok.Json_Value){&admin, &billing}
 	fp := []u8{0xDE, 0xAD, 0xBE, 0xEF}
 	members := []tok.JsonMember_Value{
 		{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},
@@ -91,10 +91,10 @@ header_noop :: proc(ctx: rawptr, root_offset: int, body: []u8) -> tok.Jws_Value 
 	return tok.Jws_Value{algorithm = "HS256", key_id = KID, signature = FIXED_SIG[:]}
 }
 mint_nohmac :: proc(w: ^tok.Claims_Writer, exp: u64) -> []u8 {
-	roles := []Maybe(tok.Json_Value){
-		tok.Json_Value{tag = .string, string = "admin"},
-		tok.Json_Value{tag = .string, string = "billing"},
-	}
+	// array elements are pointers (`Maybe(^Json_Value)`), so the elements are named vars too
+	admin := tok.Json_Value{tag = .string, string = "admin"}
+	billing := tok.Json_Value{tag = .string, string = "billing"}
+	roles := []Maybe(^tok.Json_Value){&admin, &billing}
 	fp := []u8{0xDE, 0xAD, 0xBE, 0xEF}
 	members := []tok.JsonMember_Value{
 		{key = "tenant", value = tok.Json_Value{tag = .string, string = "acme"}},

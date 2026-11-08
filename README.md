@@ -1,18 +1,18 @@
 # dagr-signed-token
 
-A **JWT-shaped signed token**, defined once as a [Dagr](https://dagr.one) schema
+A **JWT-shaped signed token**, defined once as a [Dagr](https://codeberg.org/mzaks/dagr) schema
 and generated into **Swift, Rust, TypeScript, Mojo, and Odin** — with a
 cross-language test that proves every language mints the **byte-for-byte identical**
 token and can verify the others'.
 
-> **Self-contained reference.** The `dagr` CLI and its schema DSL are **not yet public**.
-> This repo commits the generated code in `gen/`, so all five examples build, run, and
-> cross-verify **without** the CLI. `schema.py` is included to show the single source of
-> truth; regenerating from it is what needs the (closed-source) CLI.
+> **The generated code is committed.** All five examples build, run, and cross-verify from
+> `gen/`, without installing Dagr. `schema.py` is the single source of truth; to change it,
+> install the Dagr CLI (`pip install dagr-cli`, source at
+> [codeberg.org/mzaks/dagr](https://codeberg.org/mzaks/dagr)) and run `dagr build`.
 
 A JWT is `header.payload.signature`: the signature is a MAC over the payload, so
 a verifier can trust the claims *before* acting on them. This reproduces that with
-Dagr's customizable header ("14 Customizable Header.md"), **Shape A**:
+Dagr's customizable header ([spec 15](https://codeberg.org/mzaks/dagr/src/branch/main/spec/15-customizable-header.md)), **Shape A**:
 
 | JWT | dagr-signed-token |
 |---|---|
@@ -34,7 +34,7 @@ match to the byte.
 
 ```
 schema.py            the single source of truth — the Token graph + a Library(targets=[...])
-                     (shown for reference; regenerating from it needs the closed-source dagr CLI)
+                     (`dagr build` regenerates gen/ from it)
 CONTRACT.md          the shared constants every example mints (so buffers match)
 gen/                 COMMITTED generated code: gen/{swift,rust,typescript,mojo,odin}/
 examples/
@@ -67,12 +67,12 @@ hand-rolled where CommonCrypto does not exist, and Mojo's SHA-256 core is chosen
 
 ## Regenerate the code (optional)
 
-`gen/` is already committed, so this is only needed if you change `schema.py` — and it
-requires the closed-source **`dagr`** CLI (not yet public). The `run_*.sh` scripts
-auto-detect it: if `dagr` is on your PATH they regenerate `gen/` first, otherwise they use
-what's committed.
+`gen/` is already committed, so this is only needed if you change `schema.py`. Install the
+Dagr CLI from PyPI; the `run_*.sh` scripts auto-detect it: if `dagr` is on your PATH they
+regenerate `gen/` first, otherwise they use what's committed.
 
 ```bash
+pip install 'dagr-cli>=2026.11.8'   # or: uv tool install dagr-cli
 dagr build        # reads schema.py, re-emits gen/{swift,rust,typescript,mojo,odin}/
 ```
 
@@ -134,7 +134,7 @@ Verification:
 ```
 
 Each language mints + verifies in-process (warm-up + 50k reps, correctness-gated).
-The Dagr numbers exercise the **fast path**: arena-free **direct build** (spec 31 —
+The Dagr numbers exercise the **fast path**: arena-free **direct build** ([spec 33](https://codeberg.org/mzaks/dagr/src/branch/main/spec/33-direct-graph-builder.md) —
 a value tree straight to bytes, gated byte-identical to the arena) + **zero-alloc
 lazy verify** (verify-before-parse, then read fields off the buffer, no restore).
 **Rust, Swift, TypeScript, and Python** also bench an **equivalent classic HS256 JWT**
@@ -395,7 +395,7 @@ late-bindings patched by cursor offset) took serialize ~1.8 µs → ~0.5 µs and
 ~0.75 µs** (byte-identical; roundtrip/cyclic/aligned Odin suites green).
 **Rust mint** was profiled too (`dst profile`): ~870 ns = build-tree ~200 + serialize ~525 +
 `ring` HMAC ~158, and ~70 ns of the serialize was the builder's 64 KB `alloc_uninit` —
-oversized for a 207 B token. The Direct Graph Builder only ever builds *trees* (spec 31), so
+oversized for a 207 B token. The Direct Graph Builder only ever builds *trees* (spec 33), so
 the V62 pointer width is irrelevant; a small initial buffer that grows on demand
 (`DagrBuilder::with_capacity`) trimmed serialize to ~460 ns and mint to ~830 ns. Then the
 value tree itself was the next ~200 ns: the direct value structs *owned* their data
@@ -427,9 +427,8 @@ node-refs) to on-access getters (scalars stay eager) cut verify **~3.1 µs → ~
 
 ## Language coverage
 
-The token needs the **customizable header** (spec 14, to carry the signature) *and*
-**recursive unions under a frozen+packed node** (the freeform `custom` claim). Not
-every Dagr target supports that combination yet:
+The token needs the **customizable header** (spec 15, to carry the signature) *and*
+**recursive unions under a frozen+packed node** (the freeform `custom` claim):
 
 | Language | Header | Recursive packed union | In this repo |
 |---|---|---|---|
@@ -439,7 +438,7 @@ every Dagr target supports that combination yet:
 | Mojo | ✅ | ✅ | ✅ |
 | Odin | ✅ | ✅ | ✅ |
 | Python | ✅ | ✅ | ✅ (via `python-ffi`) |
-| Kotlin / Zig | ❌ — no header | — | — |
+| Go, C, C++, Java | ✅ | ✅ | not yet: generated by Dagr, not wired into this repo |
 
 For Python, **`examples/python-ffi/`** calls the generated Rust codec through a small C ABI
 (`ctypes`): byte-identical to the other targets, and faster + 43% smaller than an equivalent
@@ -454,17 +453,16 @@ Two of the shipped targets needed generator work to join:
   x86-64 SHA-NI intrinsics, whichever the target has; file I/O is native — no dependencies.)
 - **Odin**: taught the packed codegen the same **recursive union array** variant (read
   + write, coinductively breaking the self-reference through the self-delimiting array/
-  union boundaries), added the **spec-14 customizable header** to its value/serde API
+  union boundaries), added the **customizable header** (spec 15) to its value/serde API
   (a flat packed self-sized envelope + `_to_bytes_with_header`/`_from_bytes_with_header`
   with a verify-before-parse gate), and wired **DataGraph emission into `dagr build`**
   (previously only SharedBuffer overlays were emitted). Crypto is Odin's own
   `core:crypto/hmac`.
 
-Those were generator gaps, not format limits — as the remaining ones (Kotlin/Zig
-headers) close, adding a target stays a one-line change in `schema.py`'s
-`Library(targets=[...])` plus a `dagr build`.
+Those were generator gaps, not format limits. Adding a target is a one-line change in
+`schema.py`'s `Library(targets=[...])` plus a `dagr build`, and an example program for it.
 
 ---
 
-*The customizable header, the schema DSL, and the CLI are documented in the Dagr
-spec. This repo is a worked example of using them together.*
+*The customizable header, the schema DSL, and the CLI are documented in the
+[Dagr specs](https://codeberg.org/mzaks/dagr/src/branch/main/spec/README.md). This repo is a worked example of using them together.*

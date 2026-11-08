@@ -1,11 +1,11 @@
-// Dagr serializer runtime (Odin) — plan 29 Track (write side).
+// Dagr serializer runtime (Odin) — plan 31 Track (write side).
 // A BACKWARD-growing builder: one pre-sized buffer written from the far end downward. Each
 // store fills its bytes into the tail and returns the cursor (total bytes stored so far). A
 // buffer offset is the cursor value at store time; the forward distance between two stored
 // things is `cursor - offset`. `make_data()` is then just the used tail. The live bytes are
 // `buf[len(buf)-cursor .. len(buf)]`; the absolute index of the byte at store-offset `pos`
 // is `len(buf) - pos` (stable under growth, which relocates the whole tail intact).
-// Hand-ported from RethinkingDagrMojo/src/dagr_writer.mojo (byte-exact reference).
+// Hand-ported from targets/mojo/src/dagr_writer.mojo (byte-exact reference).
 package dagr_reader
 
 import "core:strings"
@@ -30,6 +30,11 @@ Builder :: struct {
 	in_progress:   map[int]bool,     // node ids currently being stored (cycle detection)
 	late_bindings: [dynamic]Dagr_LateBind,  // deferred back-edge placeholders to patch
 	reserve_bytes: int,   // back-reference placeholder width, derived from max_size (2 MiB→4, 1024→2)
+	// Bytes that will PRECEDE the finished buffer in whatever carries it (spec 12 §14): finish
+	// padding aligns `alignment_offset + total length`, so aligned arrays land on their boundary
+	// in the envelope's frame. Configuration, like `reserve_bytes` — `builder_reset` keeps it.
+	// 0 (the default) aligns relative to the buffer's own start.
+	alignment_offset: int,
 }
 
 // max_size sets the back-reference placeholder width: bits = bitlen(max_size)+3;
@@ -55,11 +60,12 @@ builder_destroy :: proc(b: ^Builder) {
 	delete(b.late_bindings)
 }
 
-// Reset a Builder for reuse across serializations ("31 Direct Graph Builder.md" §4.3 —
+// Reset a Builder for reuse across serializations ("spec/33-direct-graph-builder.md" §4.3 —
 // the reusable-writer form): free owned inner allocations (chunk buffers + dedup-map string
 // keys) but `clear` the Builder's own maps/arrays so their backing storage is reused rather
 // than re-allocated on the next mint. `reserve_bytes` depends on max_size, not content, so
-// it is preserved. Output is byte-identical to a fresh `builder_make`.
+// it is preserved — and so is `alignment_offset`, which is configuration too (spec 12 §14).
+// Output is byte-identical to a fresh `builder_make` with the same configuration.
 builder_reset :: proc(b: ^Builder) {
 	b.cursor = 0   // keep buf allocated for reuse; writes overwrite, make_data reads only the tail
 	for k in b.vt_lookup { delete(k) }
@@ -71,7 +77,7 @@ builder_reset :: proc(b: ^Builder) {
 	clear(&b.late_bindings)
 }
 
-// ── Cyclic serialization (begin/finish late-binding, plan 29 §8.6 / spec 05 V62) ──────────────
+// ── Cyclic serialization (begin/finish late-binding, plan 31 §8.6 / spec 06 V62) ──────────────
 // `begin_storing` classifies a node id: status 0 = already stored (return its offset for dedup),
 // 1 = in progress (a cycle back-edge — the caller writes a placeholder, does NOT recurse), 2 =
 // proceed (marked in-progress). The placeholder is a fixed 8-byte u64 V62 (code 3), so its slot
@@ -261,14 +267,14 @@ store_bidir :: proc(b: ^Builder, off: int) -> int {
 	return store_v62(b, to_zigzag(b.cursor - off))
 }
 
-// ── union field slots (04 Union Types.md) ────────────────────────────────────
+// ── union field slots (spec/05-union-types.md) ────────────────────────────────────
 // A pass-1 apply descriptor: `tag` = variant index; `off` = out-of-line content offset
 // (utf8/data/nested-union pointer variants, -1 = none); `nref` = stored node offset
 // (node variant, -1 = none). Pass 2 re-dispatches on `tag` to emit the inline value or the
 // forward/bidir pointer, then writes the header `[LEB (tag<<2)|wc]`.
 USlot :: struct { tag: u8, off: int, nref: int }
 
-// Cyclic node-variant union slot descriptor (plan 29 §8.6 + §8.7). Like USlot but a node variant
+// Cyclic node-variant union slot descriptor (plan 31 §8.6 + §8.7). Like USlot but a node variant
 // carries the late-binding state: `off` = the child's stored offset (when `ready`), else the child
 // id for a placeholder patched by `finish_storing`. Value variants use `off` as the utf8/data
 // content offset (-1 for an inline scalar/enum).
@@ -334,7 +340,7 @@ store_union_array :: proc(b: ^Builder, count: int, applied: []UArrElem, bp: int,
 	return store_leb(b, (u64(count) << 2) | u64(wc))
 }
 
-// ── packed-float scalar/element encoders (06 §12) ────────────────────────────
+// ── packed-float scalar/element encoders (07 §12) ────────────────────────────
 // Store a packed float; return true if stored RAW (fixed-width bytes), false if a
 // compressed / special form (leading 1-byte sub-tag). `elem`=true also emits the raw
 // sub-tag (0x07/0x08) so an array element is self-delimiting; a scalar (elem=false)
@@ -571,10 +577,17 @@ _nil_from_present :: proc(present: []bool) -> [dynamic]u8 {
 }
 
 // Packed int array (width ≥ 2): count-tag=(count<<2)|tag, tag 0 all-LEB / 1 all-raw /
-// 2 mixed (enc bitset). `vals` = sign-extended bits for signed.
-store_packed_int_array :: proc(b: ^Builder, vals: []u64, width: int, signed: bool) -> int {
+// 2 mixed (enc bitset). `vals` = sign-extended bits for signed. `raw` (a `>> raw` field,
+// spec/39): no probe, every element `width` bytes, tag 1, no enc bitset.
+store_packed_int_array :: proc(b: ^Builder, vals: []u64, width: int, signed: bool, raw := false) -> int {
 	before := b.cursor
 	n := len(vals)
+	if raw {
+		wc := _wcw(width)
+		for i := n - 1; i >= 0; i -= 1 { _ = _store_uint_wc(b, vals[i], wc) }
+		_ = store_leb(b, (u64(n) << 2) | 1)
+		return store_leb(b, u64(b.cursor - before))
+	}
 	enc := _zeros((n + 7) >> 3)
 	raw_count := 0
 	for i := n - 1; i >= 0; i -= 1 {
@@ -667,10 +680,18 @@ store_packed_bf16_array :: proc(b: ^Builder, vals: []f32) -> int {
 	return store_leb(b, u64(b.cursor - before))
 }
 
-// Packed arrayWithOptionals (compacted present elems + leading nil bitset).
-store_packed_int_opt_array :: proc(b: ^Builder, vals: []u64, present: []bool, width: int, signed: bool) -> int {
+// Packed arrayWithOptionals (compacted present elems + leading nil bitset). `raw` (spec/39):
+// no probe, every present element `width` bytes, tag 1, no enc bitset.
+store_packed_int_opt_array :: proc(b: ^Builder, vals: []u64, present: []bool, width: int, signed: bool, raw := false) -> int {
 	before := b.cursor
 	n := len(vals)
+	if raw {
+		wc := _wcw(width)
+		for i := n - 1; i >= 0; i -= 1 { if present[i] { _ = _store_uint_wc(b, vals[i], wc) } }
+		nb := _nil_from_present(present); _ = _push(b, nb)
+		_ = store_leb(b, (u64(n) << 2) | 1)
+		return store_leb(b, u64(b.cursor - before))
+	}
 	enc := _zeros((n + 7) >> 3)
 	raw_count, pres_count := 0, 0
 	for i := n - 1; i >= 0; i -= 1 {
@@ -850,19 +871,29 @@ store_vtable :: proc(b: ^Builder, entries: []int) -> int {
 	return result
 }
 
-// Raw-embedded standalone blob (§17): pad the sub-builder before its framing LEB so the
-// target's aligned fields land correctly once the blob is embedded. Finds the minimal pad
-// p such that (cursor+p + framingLen) is a multiple of max_n.
+// Finish padding (spec 12 §4, §14): zero bytes before the framing word so that
+// `alignment_offset + total length` is a multiple of `max_n` — for the root buffer, and for a
+// raw-embedded standalone blob (§17, whose sub-builder has offset 0: the blob is positioned
+// relative to the END of its parent and inherits the parent's offset from there). The framing
+// word is `LEB((distance to the root) << 2)`, the distance includes the pad, and so the word's
+// own length depends on the pad — hence a search. It runs over `[0, 2·max_n)`: that range
+// crosses at most one step of the framing length (they are ≥ 4064 apart, `max_n` ≤ 256), so
+// one side of the step holds `max_n` consecutive candidates and a solution always exists. The
+// old bound, `max_n`, could straddle the step and find none — the buffer then went out
+// unpadded and every aligned array in it misaligned (spec 42 §1). The smallest pad wins, so
+// every buffer that was padded correctly before is byte-identical.
 store_finish_alignment_padding :: proc(b: ^Builder, root_offset: int, max_n: int) {
 	if max_n <= 1 { return }
-	for p in 0 ..< max_n {
+	offset := b.alignment_offset %% max_n            // only the residue matters (floored: ≥ 0)
+	for p in 0 ..< 2 * max_n {
 		after_pad := b.cursor + p
 		framing_len := leb_length(u64((after_pad - root_offset) << 2))
-		if (after_pad + framing_len) % max_n == 0 {
+		if (offset + after_pad + framing_len) % max_n == 0 {
 			if p != 0 { _ = _push(b, _zeros(p)) }
 			return
 		}
 	}
+	panic("store_finish_alignment_padding: no pad found")   // unreachable (spec 42 §1)
 }
 
 // Finished buffer: the used tail, in forward order (owned; caller deletes).
@@ -870,4 +901,158 @@ make_data :: proc(b: ^Builder) -> []u8 {
 	out := make([]u8, b.cursor)
 	if b.cursor > 0 { copy(out, b.buf[len(b.buf) - b.cursor:]) }
 	return out
+}
+
+// ── A sink record written FORWARD ("spec/11-data-sink.md" §6.1) ─────────────────────────────
+// A record whose fields are all bounded scalars has a static size bound: its append writes
+// `[type id][size][fields]` front to back straight into the stream (`sink_forward_begin` makes
+// room at its end) instead of a backward store per field, a builder and a copy. The fields
+// start `lead` bytes in — room for the type id and the size at their bound; `sink_forward_finish`
+// puts both in front, moving the fields up when the size is shorter than its bound, and, doubly
+// linked, the span (an RLEB) behind. Every `sink_fwd_*` writes the bytes the backward store the
+// generated `store_{record}` makes for that field kind: change one, change both (gate:
+// `tests/schemas/sink_forward.py`, `gen_sink_forward_tests_odin.py`). Payload widths are
+// compile-time parameters, as in Rust (a runtime width made its forward path slower).
+Sink_Forward :: struct { out: ^[dynamic]u8, buf: []u8, start: int, fields: int, p: int }
+
+// Room for a record of at most `room` bytes at the end of `out` (capacity grows geometrically:
+// `resize` alone reallocates to the exact length).
+sink_forward_begin :: proc(out: ^[dynamic]u8, room: int, lead: int) -> Sink_Forward {
+	start := len(out)
+	if start + room > cap(out) { reserve(out, max(start + room, 2 * cap(out))) }
+	non_zero_resize(out, start + room)
+	return Sink_Forward{out = out, buf = out[:], start = start, fields = start + lead, p = start + lead}
+}
+
+@(private = "file")
+_fwd_leb :: #force_inline proc(f: ^Sink_Forward, v: u64) {
+	x := v
+	for x >= 0x80 { f.buf[f.p] = u8(x & 0x7f) | 0x80; x >>= 7; f.p += 1 }
+	f.buf[f.p] = u8(x); f.p += 1
+}
+
+// The low `W` bytes of `v`, little-endian.
+@(private = "file")
+_fwd_raw :: #force_inline proc(f: ^Sink_Forward, v: u64, $W: int) {
+	for i in 0 ..< W { f.buf[f.p + i] = u8((v >> uint(i * 8)) & 0xff) }
+	f.p += W
+}
+
+@(private = "file")
+_fwd_tagged_byte :: #force_inline proc(f: ^Sink_Forward, tag: u64, v: u8) {
+	_fwd_leb(f, tag)
+	f.buf[f.p] = v; f.p += 1
+}
+
+// `[tag | 1][byte]` — u8, i8, bool and byte-wide enums.
+sink_fwd_byte :: #force_inline proc(f: ^Sink_Forward, v: u8, index: u64) { _fwd_tagged_byte(f, (index << 1) | 1, v) }
+
+// `[tag][payload]` of a u16..u64 field (an enum's raw value): a LEB when shorter than `W` bytes,
+// unless `RAW` (spec 39).
+sink_fwd_uint :: #force_inline proc(f: ^Sink_Forward, v: u64, index: u64, $W: int, $RAW: bool) {
+	when !RAW {
+		if leb_length(v) < W { _fwd_leb(f, index << 1); _fwd_leb(f, v); return }
+	}
+	_fwd_leb(f, (index << 1) | 1)
+	_fwd_raw(f, v, W)
+}
+
+// `[tag][payload]` of an i16..i64 field: its ZigZag LEB when shorter than `W` bytes.
+sink_fwd_int :: #force_inline proc(f: ^Sink_Forward, v: i64, index: u64, $W: int, $RAW: bool) {
+	when !RAW {
+		zz := to_zigzag(int(v))
+		if leb_length(zz) < W { _fwd_leb(f, index << 1); _fwd_leb(f, zz); return }
+	}
+	_fwd_leb(f, (index << 1) | 1)
+	_fwd_raw(f, u64(v), W)
+}
+
+// A `raw` f32 / f64 field (spec 39): `[tag | 1][4 / 8 bytes]`.
+sink_fwd_raw_f32 :: #force_inline proc(f: ^Sink_Forward, v: f32, index: u64) {
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, u64(transmute(u32)v), 4)
+}
+sink_fwd_raw_f64 :: #force_inline proc(f: ^Sink_Forward, v: f64, index: u64) {
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, transmute(u64)v, 8)
+}
+
+// An f16 field — `store_packed_f16_scalar` behind its tag.
+sink_fwd_f16 :: proc(f: ^Sink_Forward, v: f16, index: u64) {
+	bits := transmute(u16)v
+	if bits == 0 || bits == 0x8000 { _fwd_tagged_byte(f, index << 1, u8(bits >> 15)); return }
+	if ((bits >> 10) & 0x1f) == 0x1f {
+		_fwd_tagged_byte(f, index << 1, (bits & 0x3ff) != 0 ? 0x04 : (bits >> 15) != 0 ? 0x03 : 0x02); return
+	}
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, u64(bits), 2)
+}
+
+// A bf16 field (API type f32, its high 16 bits) — `store_packed_bf16_scalar` behind its tag.
+sink_fwd_bf16 :: proc(f: ^Sink_Forward, v: f32, index: u64) {
+	bits := u16(transmute(u32)v >> 16)
+	if bits == 0 || bits == 0x8000 { _fwd_tagged_byte(f, index << 1, u8(bits >> 15)); return }
+	if ((bits >> 7) & 0xff) == 0xff {
+		_fwd_tagged_byte(f, index << 1, (bits & 0x7f) != 0 ? 0x04 : (bits >> 15) != 0 ? 0x03 : 0x02); return
+	}
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, u64(bits), 2)
+}
+
+// An f32 field — `store_packed_float32(v, false)` behind its tag.
+sink_fwd_f32 :: proc(f: ^Sink_Forward, v: f32, index: u64) {
+	bits := transmute(u32)v
+	if bits == 0 || bits == 0x80000000 { _fwd_tagged_byte(f, index << 1, u8(bits >> 31)); return }
+	if ((bits >> 23) & 0xff) == 0xff {
+		_fwd_tagged_byte(f, index << 1, (bits & 0x7fffff) != 0 ? 0x04 : (bits >> 31) != 0 ? 0x03 : 0x02); return
+	}
+	av := v < 0 ? -v : v
+	if av < f32(1 << 21) && v == f32(i64(v)) {
+		zz := to_zigzag(int(i64(v)))
+		if leb_length(zz) <= 3 { _fwd_tagged_byte(f, index << 1, 0x05); _fwd_leb(f, zz); return }
+	}
+	h := f16(v)
+	if f32(h) == v { _fwd_tagged_byte(f, index << 1, 0x06); _fwd_raw(f, u64(transmute(u16)h), 2); return }
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, u64(bits), 4)
+}
+
+// An f64 field — `store_packed_float64(v, false)` behind its tag.
+sink_fwd_f64 :: proc(f: ^Sink_Forward, v: f64, index: u64) {
+	bits := transmute(u64)v
+	if bits == 0 || bits == 0x8000000000000000 { _fwd_tagged_byte(f, index << 1, u8(bits >> 63)); return }
+	if ((bits >> 52) & 0x7ff) == 0x7ff {
+		_fwd_tagged_byte(f, index << 1, (bits & 0xfffffffffffff) != 0 ? 0x04 : (bits >> 63) != 0 ? 0x03 : 0x02); return
+	}
+	av := v < 0 ? -v : v
+	if av < f64(1 << 48) && v == f64(i64(v)) {
+		zz := to_zigzag(int(i64(v)))
+		if leb_length(zz) <= 7 { _fwd_tagged_byte(f, index << 1, 0x05); _fwd_leb(f, zz); return }
+	}
+	f32v := f32(v)
+	if f64(f32v) == v {
+		h := f16(f32v)
+		if f32(h) == f32v { _fwd_tagged_byte(f, index << 1, 0x06); _fwd_raw(f, u64(transmute(u16)h), 2); return }
+		_fwd_tagged_byte(f, index << 1, 0x07); _fwd_raw(f, u64(transmute(u32)f32v), 4); return
+	}
+	_fwd_leb(f, (index << 1) | 1); _fwd_raw(f, bits, 8)
+}
+
+// Puts `[type id][size]` in front of the fields — which move up when the size is shorter than
+// its bound — and, doubly linked, the span (an RLEB) behind; `out` then ends after the record.
+sink_forward_finish :: proc(f: ^Sink_Forward, type_id: u64, doubly_linked: bool) {
+	body := f.p - f.fields
+	src := f.fields
+	f.p = f.start
+	_fwd_leb(f, type_id)
+	_fwd_leb(f, u64(body))
+	q := f.p
+	if q != src { copy(f.buf[q:q + body], f.buf[src:src + body]) }   // memmove: overlap is fine
+	end := q + body
+	if doubly_linked {
+		span := u64(end - f.start)
+		n := leb_length(span)
+		// RLEB: the LEB bytes reversed — the terminator (high bit clear) leads
+		for i in 0 ..< n {
+			g := u8((span >> uint(7 * (n - 1 - i))) & 0x7f)
+			f.buf[end + i] = i == 0 ? g : g | 0x80
+		}
+		end += n
+	}
+	non_zero_resize(f.out, end)
 }

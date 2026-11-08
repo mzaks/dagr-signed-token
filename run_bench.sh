@@ -32,7 +32,7 @@ cd "$(dirname "$0")"
 ROOT="$(pwd)"
 
 if command -v dagr >/dev/null 2>&1; then
-  echo "== [gen] dagr build (closed-source CLI found — regenerating gen/) =="
+  echo "== [gen] dagr build (dagr CLI found — regenerating gen/) =="
   dagr build --schema "$ROOT/schema.py" --receipt "$ROOT/dagr.lock.json" >/dev/null
 else
   echo "== [gen] using committed gen/ (dagr CLI not on PATH) =="

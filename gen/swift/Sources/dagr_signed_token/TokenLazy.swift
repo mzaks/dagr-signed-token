@@ -20,7 +20,7 @@ extension Token {
         public init(_ data: Foundation.Data, at pos: Int) {
             _data = data
             if pos >= 0, let (hdr, hLen) = try? restoreLEB(from: data, at: pos) {
-                count = Int(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
+                count = _dagrPos(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
                 _slotStart = pos + hLen; _es = es; _base = pos + hLen + count * es
             } else { count = 0; _slotStart = -1; _es = 1; _base = 0 }
         }
@@ -29,7 +29,7 @@ extension Token {
                 guard _slotStart >= 0, idx >= 0, idx < count else { throw ArenaRestoreError.outsideOfBuffer }
                 let ro = try readSignedRelOffset(from: _data, at: _slotStart + idx * _es, size: _es)
                 guard ro != 0 else { throw ArenaRestoreError.outsideOfBuffer }
-                return try JsonMemberAccessor(data: _data, at: _base + Int(ro) - 1)
+                return try JsonMemberAccessor(data: _data, at: _base + _dagrOff(ro) - 1)
             }
         }
         public struct Iterator: IteratorProtocol {
@@ -67,7 +67,7 @@ extension Token {
         public init(_ data: Foundation.Data, at pos: Int) {
             _data = data
             if pos >= 0, let (hdr, hLen) = try? restoreLEB(from: data, at: pos) {
-                count = Int(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
+                count = _dagrPos(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
                 _slotStart = pos + hLen; _es = es; _base = pos + hLen + count * es
             } else { count = 0; _slotStart = -1; _es = 1; _base = 0 }
         }
@@ -76,7 +76,7 @@ extension Token {
                 guard _slotStart >= 0, idx >= 0, idx < count else { return nil }
                 let ro = try readSignedRelOffset(from: _data, at: _slotStart + idx * _es, size: _es)
                 guard ro != 0 else { return nil }
-                return try JsonMemberAccessor(data: _data, at: _base + Int(ro) - 1)
+                return try JsonMemberAccessor(data: _data, at: _base + _dagrOff(ro) - 1)
             }
         }
         public struct Iterator: IteratorProtocol {
@@ -116,7 +116,7 @@ extension Token {
         public init(_ data: Foundation.Data, at pos: Int) {
             _data = data
             if pos >= 0, let (hdr, hLen) = try? restoreLEB(from: data, at: pos) {
-                count = Int(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
+                count = _dagrPos(hdr >> 2); let es = [1,2,4,8][Int(hdr&3)]
                 let tidLen = (count + 1) / 2
                 let bsNilSize = (count + 7) / 8
                 _tidStart = pos + hLen
@@ -129,21 +129,21 @@ extension Token {
             get throws {
                 guard _slotStart >= 0, idx >= 0, idx < count else { return nil }
                 guard _nilBsStart + idx / 8 < _data.count, (_data[_nilBsStart + idx / 8] >> (idx % 8)) & 1 == 0 else { return nil }
-                let _typeId = Int((_data[_tidStart + idx / 2] >> ((idx % 2) * 4)) & 15)
+                let _typeId = Int((_dagrByte(_data, _tidStart + idx / 2) >> ((idx % 2) * 4)) & 15)
                 let ro = try readRelOffset(from: _data, at: _slotStart + idx * _es, size: _es)
                 switch _typeId {
                 case 0:
-                    return .string(try String.restore(from: _data, at: _base + Int(ro)))
+                    return .string(try String.restore(from: _data, at: _base + _dagrPos(ro)))
                 case 1:
                     return .number(Double(bitPattern: ro))
                 case 2:
                     return .bool(ro != 0)
                 case 3:
-                    return .array(VtableJsonOptArrayAccessor(_data, at: _base + Int(ro)))
+                    return .array(VtableJsonOptArrayAccessor(_data, at: _base + _dagrPos(ro)))
                 case 4:
-                    return .object(VtableJsonMemberOptArrayAccessor(_data, at: _base + Int(ro)))
+                    return .object(VtableJsonMemberOptArrayAccessor(_data, at: _base + _dagrPos(ro)))
                 case 5:
-                    return .data(try Foundation.Data.restore(from: _data, at: _base + Int(ro)))
+                    return .data(try Foundation.Data.restore(from: _data, at: _base + _dagrPos(ro)))
                 default: return nil
                 }
             }
@@ -192,12 +192,12 @@ extension Token {
         public init(_ data: Foundation.Data, at pos: Int) {
             _data = data
             if pos >= 0, let (c, cB) = try? restoreLEB(from: data, at: pos) {
-                count = Int(c)
-                let bsEnd = pos + cB + (Int(c) + 7) / 8
+                count = _dagrPos(c)
+                let bsEnd = pos + cB + (_dagrPos(c) + 7) / 8
                 _bsStart = pos + cB
                 if let (hss, hssB) = try? restoreLEB(from: data, at: bsEnd) {
                     _hStart = bsEnd + hssB
-                    _pStart = bsEnd + hssB + Int(hss)
+                    _pStart = bsEnd + hssB + _dagrPos(hss)
                 } else { _hStart = bsEnd; _pStart = bsEnd }
             } else { count = 0; _bsStart = -1; _hStart = -1; _pStart = -1 }
         }
@@ -213,7 +213,7 @@ extension Token {
                 _i += 1
                 if present {
                     guard let (hdr, hdrB) = try? restoreLEB(from: _acc._data, at: _hP) else { return nil }
-                    let tid = Int(hdr >> 3), code = Int(hdr & 7); _hP += hdrB
+                    let tid = _dagrPos(hdr >> 3), code = Int(hdr & 7); _hP += hdrB
                     let ep = _pP
                     let elem: JsonPackedAccessor? = (try? PackedJsonUnionOptArrayAccessor._decodePackedElem(in: _acc._data, at: ep, typeId: tid, code: code)) ?? nil
                     _pP = (try? PackedJsonUnionOptArrayAccessor._skipPackedElem(in: _acc._data, at: ep, typeId: tid, code: code)) ?? _pP
@@ -229,7 +229,7 @@ extension Token {
                 let present = _bsStart + i/8 < _data.count && (_data[_bsStart + i/8] >> (i%8)) & 1 == 0
                 if present {
                     let (hdr, hdrB) = try restoreLEB(from: _data, at: hP)
-                    let tid = Int(hdr >> 3), code = Int(hdr & 7); hP += hdrB
+                    let tid = _dagrPos(hdr >> 3), code = Int(hdr & 7); hP += hdrB
                     try body(Self._decodePackedElem(in: _data, at: pP, typeId: tid, code: code))
                     pP = try Self._skipPackedElem(in: _data, at: pP, typeId: tid, code: code)
                 } else { try body(nil) }
@@ -250,7 +250,7 @@ extension Token {
             switch typeId {
             case 0:
                 let (_blm0, _blBm0) = try restoreLEB(from: data, at: ep)
-                ep += _blBm0 + Int(_blm0)
+                ep += _blBm0 + _dagrPos(_blm0)
             case 1:
                 if code == 5 {
                     let (_, _fbm1) = try _decodePackedFloat64(from: data, at: ep)
@@ -260,13 +260,13 @@ extension Token {
                 ep += 1
             case 3:
                 let (_abszm3, _abszBm3) = try restoreLEB(from: data, at: ep)
-                ep += _abszBm3 + Int(_abszm3)
+                ep += _abszBm3 + _dagrPos(_abszm3)
             case 4:
                 let (_abszm4, _abszBm4) = try restoreLEB(from: data, at: ep)
-                ep += _abszBm4 + Int(_abszm4)
+                ep += _abszBm4 + _dagrPos(_abszm4)
             case 5:
                 let (_blm5, _blBm5) = try restoreLEB(from: data, at: ep)
-                ep += _blBm5 + Int(_blm5)
+                ep += _blBm5 + _dagrPos(_blm5)
             default: break
             }
             return ep
@@ -284,7 +284,7 @@ extension Token {
                     return .number(try Double.restore(from: data, at: pos))
                 }
             case 2:
-                guard pos < data.count else { return nil }
+                guard pos >= 0, pos < data.count else { return nil }
                 return .bool(data[pos] != 0)
             case 3:
                 let (_, _abszBm3) = try restoreLEB(from: data, at: pos)
@@ -298,10 +298,10 @@ extension Token {
                 let (_acntm4, _acntBm4) = try restoreLEB(from: data, at: _abm4)
                 var _apm4 = _abm4 + _acntBm4
                 var _avm4 = [JsonMemberAccessor]()
-                for _ in 0..<Int(_acntm4) {
+                for _ in 0..<_dagrPos(_acntm4) {
                     let (_eblm4, _eblBm4) = try restoreLEB(from: data, at: _apm4)
                     _avm4.append(try JsonMemberAccessor(data: data, at: _apm4))
-                    _apm4 += _eblBm4 + Int(_eblm4)
+                    _apm4 += _eblBm4 + _dagrPos(_eblm4)
                 }
                 return .object(_avm4)
             case 5:
@@ -328,43 +328,43 @@ extension Token {
             _nodeStart = start
             let (_, _blB) = try restoreLEB(from: data, at: start)
             var _cur = start + _blB
-            let _obs0: UInt8 = _cur + 0 < data.count ? data[_cur + 0] : 0
+            let _obs0: UInt8 = _dagrByte(data, _cur + 0)
             _cur += 1
-            let _ebs0: UInt8 = _cur + 0 < data.count ? data[_cur + 0] : 0
+            let _ebs0: UInt8 = _dagrByte(data, _cur + 0)
             _cur += 1
             if _obs0 & 1 != 0 {
                 let (_sv0, _svB0) = try restoreLEB(from: data, at: _cur)
                 _cur += _svB0
-                _r0 = _cur ..< (_cur + Int(_sv0))
-                _cur += Int(_sv0)
+                _r0 = _cur ..< (_cur + _dagrPos(_sv0))
+                _cur += _dagrPos(_sv0)
             }
             if _obs0 & 2 != 0 {
                 let (_sv1, _svB1) = try restoreLEB(from: data, at: _cur)
                 _cur += _svB1
-                _r1 = _cur ..< (_cur + Int(_sv1))
-                _cur += Int(_sv1)
+                _r1 = _cur ..< (_cur + _dagrPos(_sv1))
+                _cur += _dagrPos(_sv1)
             }
             if _obs0 & 4 != 0 {
                 let (_sv2, _svB2) = try restoreLEB(from: data, at: _cur)
                 _cur += _svB2
-                _r2 = _cur ..< (_cur + Int(_sv2))
-                _cur += Int(_sv2)
+                _r2 = _cur ..< (_cur + _dagrPos(_sv2))
+                _cur += _dagrPos(_sv2)
             }
             if _ebs0 & 1 != 0 {
                 _v3 = try UInt64.restore(from: data, at: _cur); _cur += 8
             } else {
                 let (_v, _vB) = try restoreLEB(from: data, at: _cur)
-                _v3 = UInt64(_v); _cur += _vB
+                _v3 = UInt64(truncatingIfNeeded: _v); _cur += _vB
             }
             if _ebs0 & 2 != 0 {
                 _v4 = try UInt64.restore(from: data, at: _cur); _cur += 8
             } else {
                 let (_v, _vB) = try restoreLEB(from: data, at: _cur)
-                _v4 = UInt64(_v); _cur += _vB
+                _v4 = UInt64(truncatingIfNeeded: _v); _cur += _vB
             }
             let (_abl5, _ablB5) = try restoreLEB(from: data, at: _cur)
-            _r5 = (_cur + _ablB5) ..< (_cur + _ablB5 + Int(_abl5))
-            _cur += _ablB5 + Int(_abl5)
+            _r5 = (_cur + _ablB5) ..< (_cur + _ablB5 + _dagrPos(_abl5))
+            _cur += _ablB5 + _dagrPos(_abl5)
             if _obs0 & 16 != 0 {
                 let (_ubl6, _ublB6) = try restoreLEB(from: data, at: _cur)
                 _v6 = _cur ..< (_cur + _ublB6)
@@ -376,7 +376,7 @@ extension Token {
                 case 3: _cur += 4
                 case 4: _cur += 8
                 case 5: if let (_, _fb6) = try? _decodePackedFloat64(from: data, at: _cur) { _cur += _fb6 }
-                case 6: if let (_sz6, _szB6) = try? restoreLEB(from: data, at: _cur) { _cur += _szB6 + Int(_sz6) }
+                case 6: if let (_sz6, _szB6) = try? restoreLEB(from: data, at: _cur) { _cur += _szB6 + _dagrPos(_sz6) }
                 default: break
                 }
             }
@@ -384,17 +384,17 @@ extension Token {
 
         public var subject: String? {
             guard let r = _r0 else { return nil }
-            return String(decoding: _data[r], as: UTF8.self)
+            return _dagrUTF8(_dagrSlice(_data, r))
         }
 
         public var issuer: String? {
             guard let r = _r1 else { return nil }
-            return String(decoding: _data[r], as: UTF8.self)
+            return _dagrUTF8(_dagrSlice(_data, r))
         }
 
         public var audience: String? {
             guard let r = _r2 else { return nil }
-            return String(decoding: _data[r], as: UTF8.self)
+            return _dagrUTF8(_dagrSlice(_data, r))
         }
 
         public var issuedAt: UInt64 {
@@ -425,7 +425,7 @@ extension Token {
 
         private static func _readJsonPackedAccessor(_ data: Foundation.Data, at pos: Int) throws -> JsonPackedAccessor? {
             let (hdr, hdrB) = try restoreLEB(from: data, at: pos)
-            let typeId = Int(hdr >> 3)
+            let typeId = _dagrPos(hdr >> 3)
             let code = Int(hdr & 7)
             let ep = pos + hdrB
             switch typeId {
@@ -439,7 +439,7 @@ extension Token {
                     return .number(try Double.restore(from: data, at: ep))
                 }
             case 2:
-                guard ep < data.count else { return nil }
+                guard ep >= 0, ep < data.count else { return nil }
                 return .bool(data[ep] != 0)
             case 3:
                 let (_, _abszBn3) = try restoreLEB(from: data, at: ep)
@@ -453,10 +453,10 @@ extension Token {
                 let (_acntn4, _acntBn4) = try restoreLEB(from: data, at: _abn4)
                 var _apn4 = _abn4 + _acntBn4
                 var _avn4 = [JsonMemberAccessor]()
-                for _ in 0..<Int(_acntn4) {
+                for _ in 0..<_dagrPos(_acntn4) {
                     let (_ebln4, _eblBn4) = try restoreLEB(from: data, at: _apn4)
                     _avn4.append(try JsonMemberAccessor(data: data, at: _apn4))
-                    _apn4 += _eblBn4 + Int(_ebln4)
+                    _apn4 += _eblBn4 + _dagrPos(_ebln4)
                 }
                 return .object(_avn4)
             case 5:
@@ -478,12 +478,12 @@ extension Token {
             _nodeStart = start
             let (_, _blB) = try restoreLEB(from: data, at: start)
             var _cur = start + _blB
-            let _obs0: UInt8 = _cur + 0 < data.count ? data[_cur + 0] : 0
+            let _obs0: UInt8 = _dagrByte(data, _cur + 0)
             _cur += 1
             let (_sv0, _svB0) = try restoreLEB(from: data, at: _cur)
             _cur += _svB0
-            _r0 = _cur ..< (_cur + Int(_sv0))
-            _cur += Int(_sv0)
+            _r0 = _cur ..< (_cur + _dagrPos(_sv0))
+            _cur += _dagrPos(_sv0)
             if _obs0 & 1 != 0 {
                 let (_ubl1, _ublB1) = try restoreLEB(from: data, at: _cur)
                 _v1 = _cur ..< (_cur + _ublB1)
@@ -495,7 +495,7 @@ extension Token {
                 case 3: _cur += 4
                 case 4: _cur += 8
                 case 5: if let (_, _fb1) = try? _decodePackedFloat64(from: data, at: _cur) { _cur += _fb1 }
-                case 6: if let (_sz1, _szB1) = try? restoreLEB(from: data, at: _cur) { _cur += _szB1 + Int(_sz1) }
+                case 6: if let (_sz1, _szB1) = try? restoreLEB(from: data, at: _cur) { _cur += _szB1 + _dagrPos(_sz1) }
                 default: break
                 }
             }
@@ -504,7 +504,7 @@ extension Token {
         public var key: String {
             get throws {
                 guard let r = _r0 else { throw ArenaRestoreError.outsideOfBuffer }
-                return String(decoding: _data[r], as: UTF8.self)
+                return _dagrUTF8(_dagrSlice(_data, r))
             }
         }
 
@@ -517,7 +517,7 @@ extension Token {
 
         private static func _readJsonPackedAccessor(_ data: Foundation.Data, at pos: Int) throws -> JsonPackedAccessor? {
             let (hdr, hdrB) = try restoreLEB(from: data, at: pos)
-            let typeId = Int(hdr >> 3)
+            let typeId = _dagrPos(hdr >> 3)
             let code = Int(hdr & 7)
             let ep = pos + hdrB
             switch typeId {
@@ -531,7 +531,7 @@ extension Token {
                     return .number(try Double.restore(from: data, at: ep))
                 }
             case 2:
-                guard ep < data.count else { return nil }
+                guard ep >= 0, ep < data.count else { return nil }
                 return .bool(data[ep] != 0)
             case 3:
                 let (_, _abszBn3) = try restoreLEB(from: data, at: ep)
@@ -545,10 +545,10 @@ extension Token {
                 let (_acntn4, _acntBn4) = try restoreLEB(from: data, at: _abn4)
                 var _apn4 = _abn4 + _acntBn4
                 var _avn4 = [JsonMemberAccessor]()
-                for _ in 0..<Int(_acntn4) {
+                for _ in 0..<_dagrPos(_acntn4) {
                     let (_ebln4, _eblBn4) = try restoreLEB(from: data, at: _apn4)
                     _avn4.append(try JsonMemberAccessor(data: data, at: _apn4))
-                    _apn4 += _eblBn4 + Int(_ebln4)
+                    _apn4 += _eblBn4 + _dagrPos(_ebln4)
                 }
                 return .object(_avn4)
             case 5:
@@ -571,36 +571,36 @@ extension Token {
             _nodeStart = start
             let (_bl, _blB) = try restoreLEB(from: data, at: start)
             var _cursor = start + _blB
-            let _end = _cursor + Int(_bl)
+            let _end = _cursor + _dagrPos(_bl)
 
             if _cursor < _end {
                 let (_tag0, _tag0B) = try restoreLEB(from: data, at: _cursor)
-                if Int(_tag0) >> 1 == 0 {
+                if _dagrPos(_tag0) >> 1 == 0 {
                     _cursor += _tag0B
                     let (_sv0, _sb0) = try restoreLEB(from: data, at: _cursor)
                     _cursor += _sb0
-                    _r0 = _cursor ..< (_cursor + Int(_sv0))
-                    _cursor += Int(_sv0)
+                    _r0 = _cursor ..< (_cursor + _dagrPos(_sv0))
+                    _cursor += _dagrPos(_sv0)
                 }
             }
             if _cursor < _end {
                 let (_tag1, _tag1B) = try restoreLEB(from: data, at: _cursor)
-                if Int(_tag1) >> 1 == 1 {
+                if _dagrPos(_tag1) >> 1 == 1 {
                     _cursor += _tag1B
                     let (_sv1, _sb1) = try restoreLEB(from: data, at: _cursor)
                     _cursor += _sb1
-                    _r1 = _cursor ..< (_cursor + Int(_sv1))
-                    _cursor += Int(_sv1)
+                    _r1 = _cursor ..< (_cursor + _dagrPos(_sv1))
+                    _cursor += _dagrPos(_sv1)
                 }
             }
             if _cursor < _end {
                 let (_tag2, _tag2B) = try restoreLEB(from: data, at: _cursor)
-                if Int(_tag2) >> 1 == 2 {
+                if _dagrPos(_tag2) >> 1 == 2 {
                     _cursor += _tag2B
                     let (_dv2, _db2) = try restoreLEB(from: data, at: _cursor)
                     _cursor += _db2
-                    _r2 = _cursor ..< (_cursor + Int(_dv2))
-                    _cursor += Int(_dv2)
+                    _r2 = _cursor ..< (_cursor + _dagrPos(_dv2))
+                    _cursor += _dagrPos(_dv2)
                 }
             }
         }
@@ -608,19 +608,19 @@ extension Token {
         public var algorithm: String {
             get throws {
                 guard let r = _r0 else { throw ArenaRestoreError.outsideOfBuffer }
-                return String(decoding: _data[r], as: UTF8.self)
+                return _dagrUTF8(_dagrSlice(_data, r))
             }
         }
 
         public var keyId: String? {
             guard let r = _r1 else { return nil }
-            return String(decoding: _data[r], as: UTF8.self)
+            return _dagrUTF8(_dagrSlice(_data, r))
         }
 
         public var signature: Foundation.Data {
             get throws {
                 guard let r = _r2 else { throw ArenaRestoreError.outsideOfBuffer }
-                return Foundation.Data(_data[r])
+                return Foundation.Data(_dagrSlice(_data, r))
             }
         }
 
@@ -629,9 +629,9 @@ extension Token {
     public static func lazyRoot(from data: Foundation.Data, header headerGate: (JwsAccessor, Int, Foundation.Data) throws -> Void) throws -> ClaimsAccessor {
         let (framing, hdrBytes) = try restoreLEB(from: data, at: 0)
         guard (framing & 1) == 1 else { throw ArenaRestoreError.missingHeader }
-        let storedOffset = Int(framing >> 2)
+        let storedOffset = _dagrPos(framing >> 2)
         let (hcs, hcsB) = try restoreLEB(from: data, at: hdrBytes)
-        let H = hcsB + Int(hcs)
+        let H = hcsB + _dagrPos(hcs)
         let header = try JwsAccessor(data: data, at: hdrBytes)
         let body = data.subdata(in: hdrBytes + H ..< data.count)
         try headerGate(header, storedOffset - H, body)

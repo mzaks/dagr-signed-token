@@ -236,7 +236,7 @@ extension ArenaUnion {
         return .encoded
     }
     public func store(with builder: any ArenaBuilder) throws -> BufferOffset {
-        // Nested-union value form (spec "04 Union Types.md" §nested): [value][LEB(inner_tid << 2)].
+        // Nested-union value form (spec "spec/05-union-types.md" §nested): [value][LEB(inner_tid << 2)].
         // The low 2 bits (a width code) are NOT emitted here — the reader recovers each
         // variant's width from the schema (scalars) or self-describing pointers (utf8/data/
         // node/array variants), so a width code would be redundant. Keeping it at zero makes
@@ -263,7 +263,7 @@ public protocol ArenaBuilder {
     var cursor: BufferOffset { get }
     var maxSize: UInt64 { get }
     var reserveFieldPointerSize: Int { get }
-    // Write-side default elision ("13 Defaults and Prefabs.md" §4). True for normal serialization;
+    // Write-side default elision ("spec/14-defaults-and-prefabs.md" §4). True for normal serialization;
     // set false while building prototype/prefab default blobs so they materialize every field.
     var elideDefaults: Bool { get }
     func setElideDefaults(_ v: Bool)
@@ -296,6 +296,13 @@ public final class DataArenaBuilder: ArenaBuilder {
     public let reserveFieldPointerSize: Int
     public private(set) var elideDefaults: Bool = true
     public func setElideDefaults(_ v: Bool) { elideDefaults = v }
+    /// The number of bytes that will PRECEDE the finished buffer in whatever carries it — a
+    /// frame header, a length word ("spec/12-memory-aligned-fields.md" §14). Finish padding
+    /// then makes `alignmentOffset + length` a multiple of the graph's largest `aligned(N)`,
+    /// so every aligned array lands on its boundary in the frame of the ENVELOPE. Only the
+    /// value mod N matters; 0 (the default) is a buffer that stands on its own. No wire
+    /// change — a reader neither knows nor needs it. Configuration: `reset()` keeps it.
+    public var alignmentOffset: Int = 0
     private var capacity: UInt64
     private var _data: UnsafeMutableRawPointer
     public var cursor: BufferOffset { .offset(_cursor) }
@@ -323,16 +330,28 @@ public final class DataArenaBuilder: ArenaBuilder {
         Data(bytes: _data.advanced(by: Int(leftCursor)), count: Int(_cursor))
     }
 
+    /// The stored record as a VIEW (no copy) — valid until the next store / `reset()`.
+    public var recordBytes: UnsafeRawBufferPointer {
+        UnsafeRawBufferPointer(start: _data.advanced(by: Int(leftCursor)), count: Int(_cursor))
+    }
+
     public func storeFinishAlignmentPadding(rootOffset: BufferOffset, maxN: Int, headerSpan: Int = 0) throws {
         guard maxN > 1 else { return }
         // The leading framing word encodes (storedOffset << 2 | discriminator bits); its
         // LEB length — not the bare distance — plus the header span (if any) precede the
         // body, so total length = framingLen + headerSpan + afterPad must be ≡ 0 mod maxN.
-        for p in 0..<maxN {
+        // The framing length depends on the pad, hence the search — over [0, 2·maxN): that
+        // range crosses at most one step of the framing length, so one side of the step
+        // holds maxN consecutive candidates and a pad always exists. The old bound, maxN,
+        // could straddle the step and find none; the buffer then went out UNPADDED and
+        // every aligned array in it was misaligned (spec 42 §1). The smallest pad wins, so
+        // every buffer the old search padded is byte-identical.
+        let offset = ((alignmentOffset % maxN) + maxN) % maxN
+        for p in 0..<(2 * maxN) {
             let afterPad = Int(_cursor) + p
             let storedOffset = (UInt64(afterPad) - rootOffset.value) + UInt64(headerSpan)
             let framingLen   = lebLength(storedOffset << 2)
-            if (afterPad + framingLen + headerSpan) % maxN == 0 {
+            if (offset + afterPad + framingLen + headerSpan) % maxN == 0 {
                 for _ in 0..<p { _ = try store(number: UInt8(0)) }
                 return
             }
@@ -714,6 +733,29 @@ extension Double: ArenaGraphStorable {
         _ = try b.store(number: self); return .raw(8)
     }
     public func store(with b: any ArenaBuilder) throws -> BufferOffset { try b.store(number: self) }
+}
+
+// [String] / [Data]: the generic `Array.storePacked` below reaches these through per-call
+// `Element.self` probes and a per-element `as? any ArenaGraphStorable` cast. These concrete
+// overloads (chosen statically wherever the element type is known, e.g. every generated
+// packed store) write the same bytes: elements back-to-front, plain count, block length.
+extension Array where Element == String {
+    public func storePacked(with builder: any ArenaBuilder) throws -> PackedStoreResult {
+        let before = builder.cursor
+        for s in reversed() { _ = try s.storePacked(with: builder) }
+        _ = try builder.storeAsLEB(value: UInt64(count))
+        _ = try builder.storeAsLEB(value: builder.cursor.value - before.value)
+        return .raw(0)
+    }
+}
+extension Array where Element == Foundation.Data {
+    public func storePacked(with builder: any ArenaBuilder) throws -> PackedStoreResult {
+        let before = builder.cursor
+        for d in reversed() { _ = try d.storePacked(with: builder) }
+        _ = try builder.storeAsLEB(value: UInt64(count))
+        _ = try builder.storeAsLEB(value: builder.cursor.value - before.value)
+        return .raw(0)
+    }
 }
 
 extension Array: ArenaGraphStorable {
@@ -1266,7 +1308,9 @@ extension Array: ArenaGraphStorable {
 
 // ── ArenaGraphRestorable ──────────────────────────────────────────────────────
 
-public enum ArenaRestoreError: Error { case outsideOfBuffer; case invalidEnumValue; case invalidFraming; case missingHeader }
+// `tooDeep`: the values nest deeper than the restore's depth limit (spec/48, 128 levels: every
+// node value and every union value the restore enters is one level, the root included).
+public enum ArenaRestoreError: Error { case outsideOfBuffer; case invalidEnumValue; case invalidFraming; case missingHeader; case tooDeep; case invalidUtf8 }
 
 public protocol ArenaGraphRestorable {
     static func restore(from data: Data, at: Int) throws -> Self
@@ -1277,6 +1321,33 @@ extension ArenaGraphRestorable {
     public static func packedByteCount(in data: Data, at pos: Int) throws -> Int {
         throw ArenaRestoreError.outsideOfBuffer
     }
+}
+
+// ── Total reads over untrusted bytes (spec/38 §10.1) ─────────────────────────
+//
+// A lazy getter over a malformed buffer must throw or read nonsense — never trap. These are
+// what the generated readers use wherever a position or a length comes off the wire.
+
+/// The byte at `i`, or 0 outside the buffer.
+@inline(__always) func _dagrByte(_ d: Data, _ i: Int) -> UInt8 {
+    (i >= 0 && i < d.count) ? d[i] : 0
+}
+
+/// `d[r]`, or empty when `r` leaves the buffer.
+@inline(__always) func _dagrSlice(_ d: Data, _ r: Range<Int>) -> Data {
+    (r.lowerBound >= 0 && r.upperBound <= d.count) ? d[r] : Data()
+}
+
+/// A wire length, offset or count as an `Int`, clamped to 2^48: no buffer is that large, so a
+/// clamped value stays out of range for every read, and sums of positions and clamped values
+/// cannot overflow (`Int(v)` traps at 2^63, and `p + Int(v)` long before).
+@inline(__always) func _dagrPos(_ v: UInt64) -> Int {
+    v < (1 << 48) ? Int(v) : (1 << 48)
+}
+
+/// A signed wire offset (a node-ref array slot) as an `Int`, clamped to ±2^48 — `_dagrPos`'s twin.
+@inline(__always) func _dagrOff(_ v: Int64) -> Int {
+    v < -(1 << 48) ? -(1 << 48) : (v > (1 << 48) ? (1 << 48) : Int(v))
 }
 
 func restoreLEB(from data: Data, at: Int) throws -> (UInt64, Int) {
@@ -1393,7 +1464,7 @@ extension String: ArenaGraphRestorable {
     public static func restore(from d: Data, at i: Int) throws -> Self {
         let (count, bytes) = try restoreLEB(from: d, at: i)
         guard d.count >= i + bytes + Int(count) else { throw ArenaRestoreError.outsideOfBuffer }
-        return String(decoding: d[(i + bytes)..<(i + bytes + Int(count))], as: UTF8.self)
+        return try _dagrStrictUTF8(d[(i + bytes)..<(i + bytes + Int(count))])
     }
     public static func restorePacked(from d: Data, at i: Int) throws -> Self { try restore(from: d, at: i) }
     public static func packedByteCount(in d: Data, at i: Int) throws -> Int {
@@ -1700,6 +1771,22 @@ func _decodePackedF16(from data: Data, at cursor: Int) throws -> (Float, Int) {
 
 // ── Packed float decode ───────────────────────────────────────────────────────
 
+/// The raw value of an ENUM variant of a packed union value (spec 07 §8, spec 42 D4): a
+/// varint under code 0, otherwise `1 << (code - 1)` raw bytes. Returns (value, bytes read).
+@inline(__always)
+func _restoreUnionEnumRaw(from data: Data, at pos: Int, code: Int) throws -> (UInt64, Int) {
+    switch code {
+    case 0: return try restoreLEB(from: data, at: pos)
+    case 1:
+        guard pos >= 0, pos < data.count else { throw ArenaRestoreError.outsideOfBuffer }
+        return (UInt64(data[pos]), 1)
+    case 2: return (UInt64(try UInt16.restore(from: data, at: pos)), 2)
+    case 3: return (UInt64(try UInt32.restore(from: data, at: pos)), 4)
+    case 4: return (try UInt64.restore(from: data, at: pos), 8)
+    default: throw ArenaRestoreError.outsideOfBuffer
+    }
+}
+
 func _decodePackedFloat32(from data: Data, at cursor: Int) throws -> (Float, Int) {
     guard cursor >= 0, cursor < data.count else { throw ArenaRestoreError.outsideOfBuffer }
     let tag = data[cursor]
@@ -1777,10 +1864,35 @@ func _decodePackedFloat64(tag: UInt8, from data: Data, at payloadStart: Int) thr
 // ── Numeric array restore helpers (inline format) ────────────────────────────
 // Format: [LEB(count)] [elem[0]..elem[N-1]] (LE raw bytes, W = MemoryLayout<T>.size each).
 
+// spec/43: `count` native-LE elements of `width` bytes at raw-buffer offset `offset`, copied
+// as ONE block into a new array. nil — the caller then reads element by element — unless
+// T is a fixed-width integer or binary float exactly `width` bytes wide (never Bool: not
+// every byte is a valid Bool), the host is little-endian and the block fits the buffer.
+func _bulkLE<T>(_ type: T.Type, from data: Data, offset: Int, count: Int, width: Int) -> [T]? {
+    #if _endian(little)
+    guard MemoryLayout<T>.size == width,
+          T.self is any FixedWidthInteger.Type || T.self is any BinaryFloatingPoint.Type,
+          offset >= 0, count >= 0 else { return nil }
+    if count == 0 { return [] }
+    return data.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> [T]? in
+        guard offset <= b.count, count <= (b.count - offset) / width else { return nil }
+        let src = UnsafeRawBufferPointer(rebasing: b[offset ..< offset + count * width])
+        return [T](unsafeUninitializedCapacity: count) { dst, n in
+            UnsafeMutableRawBufferPointer(dst).copyMemory(from: src)
+            n = count
+        }
+    }
+    #else
+    return nil
+    #endif
+}
+
 func _restoreNumericArray<T: ArenaGraphRestorable>(type: T.Type, from data: Data, at pos: Int) throws -> [T] {
     let (countU64, cLen) = try restoreLEB(from: data, at: pos)
     let count = Int(countU64); let W = MemoryLayout<T>.size
     let base = pos + cLen
+    // `T.restore` reads at a raw-buffer offset; so does the block copy (spec/43)
+    if let bulk = _bulkLE(T.self, from: data, offset: base, count: count, width: W) { return bulk }
     var arr = [T](); arr.reserveCapacity(count)
     for i in 0..<count { arr.append(try T.restore(from: data, at: base + i * W)) }
     return arr
@@ -2013,7 +2125,7 @@ public struct PackedU8ArrayAccessor {
     }
     public subscript(_ idx: Int) -> UInt8 {
         guard _start >= 0, idx >= 0, idx < count else { return 0 }
-        return _data[_start + idx]
+        return _dagrByte(_data, _start + idx)
     }
 }
 
@@ -2028,7 +2140,7 @@ public struct PackedI8ArrayAccessor {
     }
     public subscript(_ idx: Int) -> Int8 {
         guard _start >= 0, idx >= 0, idx < count else { return 0 }
-        return Int8(bitPattern: _data[_start + idx])
+        return Int8(bitPattern: _dagrByte(_data, _start + idx))
     }
 }
 
@@ -2163,7 +2275,7 @@ public struct PackedUtf8ArrayAccessor {
         var p = _start
         for i in 0..<count {
             guard let (len, lenB) = try? restoreLEB(from: _data, at: p) else { return "" }
-            if i == idx { return String(decoding: _data[(p + lenB)..<(p + lenB + Int(len))], as: UTF8.self) }
+            if i == idx { return _dagrUTF8(_data[(p + lenB)..<(p + lenB + Int(len))]) }
             p += lenB + Int(len)
         }
         return ""
@@ -2238,11 +2350,72 @@ func _packedEncOptSeek(from data: Foundation.Data, headerAt pos: Int, index idx:
     return nil
 }
 // Read `width` little-endian bytes at p into a UInt64, or nil if out of bounds.
+// UTF-8 bytes → String through the contiguous-buffer fast path. `String(decoding: data[r])`
+// on a Data slice walks it through the generic Collection path, byte by byte (~10× slower).
+@usableFromInline func _dagrUTF8(_ bytes: Foundation.Data) -> String {
+    bytes.withUnsafeBytes { String(decoding: $0, as: UTF8.self) }
+}
+
+/// Whether `p` is well-formed UTF-8 (RFC 3629): no overlong form, no surrogate, nothing above
+/// U+10FFFF, no sequence cut short.
+@usableFromInline func _dagrValidUTF8(_ p: UnsafeRawBufferPointer) -> Bool {
+    let n = p.count
+    var i = 0
+    while i < n {
+        let c = p[i]
+        if c < 0x80 { i += 1; continue }
+        let len: Int
+        var lo: UInt8 = 0x80, hi: UInt8 = 0xBF   // the bounds of the second byte
+        if c >= 0xC2 && c <= 0xDF {
+            len = 2
+        } else if c >= 0xE0 && c <= 0xEF {
+            len = 3
+            if c == 0xE0 { lo = 0xA0 }   // no overlong 3-byte form
+            if c == 0xED { hi = 0x9F }   // no surrogate
+        } else if c >= 0xF0 && c <= 0xF4 {
+            len = 4
+            if c == 0xF0 { lo = 0x90 }   // no overlong 4-byte form
+            if c == 0xF4 { hi = 0x8F }   // nothing above U+10FFFF
+        } else {
+            return false
+        }
+        if n - i < len { return false }
+        if p[i + 1] < lo || p[i + 1] > hi { return false }
+        var k = 2
+        while k < len {
+            if p[i + k] < 0x80 || p[i + k] > 0xBF { return false }
+            k += 1
+        }
+        i += len
+    }
+    return true
+}
+
+/// A restore's read of a utf8 value (spec/49 U1): invalid text throws, never becomes U+FFFD.
+@usableFromInline func _dagrStrictUTF8(_ bytes: Foundation.Data) throws -> String {
+    try bytes.withUnsafeBytes { raw in
+        guard _dagrValidUTF8(raw) else { throw ArenaRestoreError.invalidUtf8 }
+        return String(decoding: raw, as: UTF8.self)
+    }
+}
+
+// One unaligned load per value (not `width` Data subscripts). `p` is a buffer index like
+// every reader's `data[p]`, so the raw-buffer offset is taken relative to `startIndex`.
 func _readRawLE(from data: Foundation.Data, at p: Int, width: Int) -> UInt64? {
     guard p >= 0, p + width <= data.count else { return nil }
-    var v: UInt64 = 0
-    for j in 0..<width { v |= UInt64(data[p + j]) << (UInt64(j) * 8) }
-    return v
+    return data.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> UInt64? in
+        let o = p - data.startIndex
+        guard o >= 0, o + width <= b.count else { return nil }
+        switch width {
+        case 8: return UInt64(littleEndian: b.loadUnaligned(fromByteOffset: o, as: UInt64.self))
+        case 4: return UInt64(UInt32(littleEndian: b.loadUnaligned(fromByteOffset: o, as: UInt32.self)))
+        case 2: return UInt64(UInt16(littleEndian: b.loadUnaligned(fromByteOffset: o, as: UInt16.self)))
+        default:
+            var v: UInt64 = 0
+            for j in 0..<width { v |= UInt64(b[o + j]) << (UInt64(j) * 8) }
+            return v
+        }
+    }
 }
 // Eager materialization of a packed integer array. `countPos` = position of the count LEB.
 // `rawDecode`/`lebDecode` map the raw-LE / LEB u64 to the element type. Shares the header + enc-bitset
@@ -2252,6 +2425,11 @@ func _restorePackedIntArray<T>(from data: Foundation.Data, at countPos: Int, raw
     guard countPos >= 0, let (c, cB) = try? restoreLEB(from: data, at: countPos) else { return [] }
     let count = Int(c) >> 2; let tag = Int(c) & 3
     let encStart = countPos + cB
+    // tag 1: every element raw — one block copy (spec/43); `_readRawLE` positions are
+    // buffer indices, relative to startIndex
+    if tag == 1, let bulk = _bulkLE(T.self, from: data, offset: encStart - data.startIndex, count: count, width: rawWidth) {
+        return bulk
+    }
     var result = [T](); result.reserveCapacity(count)
     var p = encStart + (tag == 2 ? (count + 7) / 8 : 0)
     for i in 0..<count {
@@ -2281,7 +2459,7 @@ func _restorePackedIntOptArray<T>(from data: Foundation.Data, at countPos: Int, 
 }
 // Eager materialization of a packed complex array (self-delimiting elements: LEB length + bytes).
 // `countPos` = position of the count LEB. `make` builds the element from a byte slice.
-func _restorePackedComplexArray<T>(from data: Foundation.Data, at countPos: Int, _ make: (Foundation.Data) -> T) throws -> [T] {
+func _restorePackedComplexArray<T>(from data: Foundation.Data, at countPos: Int, _ make: (Foundation.Data) throws -> T) throws -> [T] {
     guard countPos >= 0, let (c, cB) = try? restoreLEB(from: data, at: countPos) else { return [] }
     let count = Int(c)
     var result = [T](); result.reserveCapacity(count)
@@ -2289,11 +2467,11 @@ func _restorePackedComplexArray<T>(from data: Foundation.Data, at countPos: Int,
     for _ in 0..<count {
         let (sv, sb) = try restoreLEB(from: data, at: p); p += sb
         guard p + Int(sv) <= data.count else { throw ArenaRestoreError.outsideOfBuffer }
-        result.append(make(data[p..<(p + Int(sv))])); p += Int(sv)
+        result.append(try make(data[p..<(p + Int(sv))])); p += Int(sv)
     }
     return result
 }
-func _restorePackedComplexOptArray<T>(from data: Foundation.Data, at countPos: Int, _ make: (Foundation.Data) -> T) throws -> [T?] {
+func _restorePackedComplexOptArray<T>(from data: Foundation.Data, at countPos: Int, _ make: (Foundation.Data) throws -> T) throws -> [T?] {
     guard countPos >= 0, let (c, cB) = try? restoreLEB(from: data, at: countPos) else { return [] }
     let count = Int(c)
     let nilStart = countPos + cB
@@ -2305,7 +2483,7 @@ func _restorePackedComplexOptArray<T>(from data: Foundation.Data, at countPos: I
         if isNil { result.append(nil); continue }
         let (sv, sb) = try restoreLEB(from: data, at: p); p += sb
         guard p + Int(sv) <= data.count else { throw ArenaRestoreError.outsideOfBuffer }
-        result.append(make(data[p..<(p + Int(sv))])); p += Int(sv)
+        result.append(try make(data[p..<(p + Int(sv))])); p += Int(sv)
     }
     return result
 }
@@ -2317,6 +2495,11 @@ func _restorePackedFloatArray<T>(from data: Foundation.Data, at countPos: Int,
                                  _ dec: (Foundation.Data, Int) throws -> (T, Int)) throws -> [T] {
     guard countPos >= 0, let (c, cB) = try? restoreLEB(from: data, at: countPos) else { return [] }
     let count = Int(c) >> 2
+    // mode 1 (from the wire): every element raw — one block copy (spec/43)
+    if Int(c) & 3 == 1,
+       let bulk = _bulkLE(T.self, from: data, offset: countPos + cB - data.startIndex, count: count, width: MemoryLayout<T>.size) {
+        return bulk
+    }
     var result = [T](); result.reserveCapacity(count)
     var p = countPos + cB
     for _ in 0..<count { let (v, b) = try dec(data, p); result.append(v); p += b }
@@ -2700,7 +2883,7 @@ public struct PackedUtf8OptArrayAccessor {
                 guard let (len, lB) = try? restoreLEB(from: _data, at: p) else { return nil }
                 let s = p + lB; let e = s + Int(len)
                 guard e <= _data.count else { return nil }
-                return String(decoding: _data[s..<e], as: UTF8.self)
+                return _dagrUTF8(_data[s..<e])
             }
             if present {
                 guard let (len, lB) = try? restoreLEB(from: _data, at: p) else { return nil }
@@ -3303,58 +3486,322 @@ public struct VtableDataOptArrayAccessor {
 // (`map`, `filter`, `reduce`, `compactMap`, `forEach`, `for … in`, …) work directly
 // on the lazy accessor without first materializing an array. `Element` is the
 // accessor's own subscript type (non-optional for packed numeric arrays, optional for
-// the AWO / vtable variants). Iteration walks by index; for the packed variable-length
-// (utf8/data) accessors that subscript is O(n), so a full traversal is O(n²) — decode
-// once via `map`/`Array(_:)` if you need repeated access.
+// the AWO / vtable variants). Accessors whose subscript must seek from element 0 (packed
+// utf8/data, self-describing floats, LEB/mixed ints, every packed optional-element array)
+// also provide a forward walk (`_walkStart`/`_walkNext`), so a traversal is O(n) in total;
+// the rest iterate by their O(1) subscript. Random access by subscript is unchanged.
+public struct DagrWalk {
+    public var p: Int   // byte position of the next element's payload; -1 once malformed
+    public var a: Int   // accessor-specific (bitset base)
+    public var b: Int   // accessor-specific (encoding tag / bitset length)
+    @inlinable public init(_ p: Int, _ a: Int = 0, _ b: Int = 0) { self.p = p; self.a = a; self.b = b }
+}
 public protocol DagrArrayAccessorSequence: Sequence {
     associatedtype Value
     var count: Int { get }
     subscript(_ idx: Int) -> Value { get }
+    /// Start of a forward walk, or nil when the subscript is already O(1).
+    func _walkStart() -> DagrWalk?
+    /// Decode element `idx` (the walk's next element) and advance the walk past it.
+    func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Value
 }
+// @inlinable so the iterator is specialized in the CALLER's module (`Array(acc)`, `for … in`,
+// `map`): across a module boundary an opaque generic `next()` costs ~4× the element decode.
 public struct DagrArrayAccessorIterator<A: DagrArrayAccessorSequence>: IteratorProtocol {
-    private let _acc: A
-    private var _i = 0
-    fileprivate init(_ acc: A) { _acc = acc }
-    public mutating func next() -> A.Value? {
-        guard _i < _acc.count else { return nil }
+    @usableFromInline let _acc: A
+    @usableFromInline let _count: Int
+    @usableFromInline var _walk: DagrWalk?
+    @usableFromInline var _i = 0
+    @inlinable init(_ acc: A) { _acc = acc; _count = acc.count; _walk = _count > 0 ? acc._walkStart() : nil }
+    @inlinable public mutating func next() -> A.Value? {
+        guard _i < _count else { return nil }
         defer { _i += 1 }
+        if _walk != nil { return _acc._walkNext(&_walk!, _i) }
         return _acc[_i]
     }
 }
 public extension DagrArrayAccessorSequence {
-    func makeIterator() -> DagrArrayAccessorIterator<Self> { DagrArrayAccessorIterator(self) }
+    @inlinable func makeIterator() -> DagrArrayAccessorIterator<Self> { DagrArrayAccessorIterator(self) }
+    @inlinable var underestimatedCount: Int { count }
+    func _walkStart() -> DagrWalk? { nil }
+    func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Value { self[idx] }
+}
+
+// Forward-walk helpers shared by the packed accessors below.
+@inline(__always) func _bitSet(_ data: Foundation.Data, _ base: Int, _ i: Int) -> Bool {
+    base + i / 8 < data.count && (data[base + i / 8] >> (i % 8)) & 1 != 0
+}
+// Length-prefixed utf8/data element at the walk: returns its byte range and advances.
+@inline(__always) func _walkBlob(_ data: Foundation.Data, _ w: inout DagrWalk) -> Range<Int>? {
+    guard w.p >= 0, let (len, lB) = try? restoreLEB(from: data, at: w.p) else { w.p = -1; return nil }
+    let s = w.p + lB, e = s + Int(len)
+    guard e <= data.count else { w.p = -1; return nil }
+    w.p = e
+    return s..<e
+}
+// Packed int array header → walk (a = enc bitset base, b = tag); nil for tag 1 (all-raw: O(1) subscript).
+func _packedIntWalkStart(_ data: Foundation.Data, _ pos: Int) -> DagrWalk? {
+    guard pos >= 0, let (c, cB) = try? restoreLEB(from: data, at: pos) else { return nil }
+    let count = Int(c) >> 2, tag = Int(c) & 3, enc = pos + cB
+    if tag == 1 { return nil }
+    return DagrWalk(enc + (tag == 2 ? (count + 7) / 8 : 0), enc, tag)
+}
+// Optional-element packed int header → walk (a = nil bitset base, b = tag | bitsetLen << 2).
+func _packedIntOptWalkStart(_ data: Foundation.Data, _ pos: Int) -> DagrWalk? {
+    guard pos >= 0, let (c, cB) = try? restoreLEB(from: data, at: pos) else { return nil }
+    let count = Int(c) >> 2, tag = Int(c) & 3, nilStart = pos + cB, bs = (count + 7) / 8
+    return DagrWalk(nilStart + bs + (tag == 2 ? bs : 0), nilStart, tag | (bs << 2))
+}
+// Next int element: (value bits, isRaw) or nil (absent / malformed).
+@inline(__always) func _packedIntWalkNext(_ data: Foundation.Data, _ w: inout DagrWalk, _ idx: Int, rawWidth: Int, encBase: Int, tag: Int) -> (UInt64, Bool)? {
+    guard w.p >= 0 else { return nil }
+    if tag == 1 || (tag == 2 && _bitSet(data, encBase, idx)) {
+        guard let r = _readRawLE(from: data, at: w.p, width: rawWidth) else { w.p = -1; return nil }
+        w.p += rawWidth
+        return (r, true)
+    }
+    guard let (v, vB) = try? restoreLEB(from: data, at: w.p) else { w.p = -1; return nil }
+    w.p += vB
+    return (v, false)
+}
+
+// Raw-mode array store (floats §5.2 mode 1, `raw` ints spec/39): the elements are native-LE
+// and stored back-to-front, i.e. forward in the buffer — one contiguous store, byte-identical
+// to storing each element in reverse.
+@inline(__always) public func _dagrStoreRawArray<T>(_ a: [T], with builder: any ArenaBuilder) throws {
+    try a.withUnsafeBytes { b in if b.count > 0 { _ = try builder.store(rawPointer: b.baseAddress!, size: b.count) } }
 }
 
 extension PackedBoolArrayAccessor: DagrArrayAccessorSequence {}
 extension PackedU8ArrayAccessor: DagrArrayAccessorSequence {}
 extension PackedI8ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU16ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI16ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU32ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI32ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU64ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI64ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF32ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF64ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF16ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedBf16ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedUtf8ArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedDataArrayAccessor: DagrArrayAccessorSequence {}
+extension PackedU16ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt16 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 2, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return UInt16(truncatingIfNeeded: _raw) }
+        return UInt16(truncatingIfNeeded: v)
+    }
+}
+extension PackedI16ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int16 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 2, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return Int16(bitPattern: UInt16(truncatingIfNeeded: _raw)) }
+        return Int16(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedU32ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt32 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 4, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return UInt32(truncatingIfNeeded: _raw) }
+        return UInt32(truncatingIfNeeded: v)
+    }
+}
+extension PackedI32ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int32 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 4, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return Int32(bitPattern: UInt32(truncatingIfNeeded: _raw)) }
+        return Int32(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedU64ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt64 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 8, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return UInt64(truncatingIfNeeded: _raw) }
+        return UInt64(truncatingIfNeeded: v)
+    }
+}
+extension PackedI64ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int64 {
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 8, encBase: w.a, tag: w.b) else { return 0 }
+        if isRaw { let _raw = v; return Int64(bitPattern: UInt64(truncatingIfNeeded: _raw)) }
+        return Int64(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedF32ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _mode == 1 ? nil : DagrWalk(_start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float {
+        guard w.p >= 0, let (v, vB) = try? _decodePackedFloat32(from: _data, at: w.p) else { w.p = -1; return 0 }
+        w.p += vB
+        return v
+    }
+}
+extension PackedF64ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _mode == 1 ? nil : DagrWalk(_start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Double {
+        guard w.p >= 0, let (v, vB) = try? _decodePackedFloat64(from: _data, at: w.p) else { w.p = -1; return 0 }
+        w.p += vB
+        return v
+    }
+}
+extension PackedF16ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float {
+        guard w.p >= 0 else { return 0 }
+        if _bitSet(_data, w.a, idx) {
+            guard w.p + 1 < _data.count else { w.p = -1; return 0 }
+            let bits = UInt16(_data[w.p]) | (UInt16(_data[w.p + 1]) << 8)
+            w.p += 2
+            return _f16BitsToF32(bits)
+        }
+        let v = (try? _decodePackedF16(from: _data, at: w.p))?.0 ?? 0
+        w.p += 1
+        return v
+    }
+}
+extension PackedBf16ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float {
+        guard w.p >= 0 else { return 0 }
+        if _bitSet(_data, w.a, idx) {
+            guard w.p + 1 < _data.count else { w.p = -1; return 0 }
+            let bits = UInt16(_data[w.p]) | (UInt16(_data[w.p + 1]) << 8)
+            w.p += 2
+            return _bf16BitsToF32(bits)
+        }
+        let v = (try? _decodePackedF16(from: _data, at: w.p))?.0 ?? 0
+        w.p += 1
+        return v
+    }
+}
+extension PackedUtf8ArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> String {
+        guard let r = _walkBlob(_data, &w) else { return "" }
+        return _dagrUTF8(_dagrSlice(_data, r))
+    }
+}
+extension PackedDataArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Foundation.Data {
+        guard let r = _walkBlob(_data, &w) else { return Foundation.Data() }
+        return Foundation.Data(_dagrSlice(_data, r))
+    }
+}
 extension PackedBoolOptArrayAccessor: DagrArrayAccessorSequence {}
 extension PackedU8OptArrayAccessor: DagrArrayAccessorSequence {}
 extension PackedI8OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU16OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI16OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU32OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI32OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedU64OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedI64OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF32OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF64OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedF16OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedBf16OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedUtf8OptArrayAccessor: DagrArrayAccessorSequence {}
-extension PackedDataOptArrayAccessor: DagrArrayAccessorSequence {}
+extension PackedU16OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt16? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 2, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return UInt16(truncatingIfNeeded: _raw) }
+        return UInt16(truncatingIfNeeded: v)
+    }
+}
+extension PackedI16OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int16? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 2, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return Int16(bitPattern: UInt16(truncatingIfNeeded: _raw)) }
+        return Int16(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedU32OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt32? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 4, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return UInt32(truncatingIfNeeded: _raw) }
+        return UInt32(truncatingIfNeeded: v)
+    }
+}
+extension PackedI32OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int32? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 4, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return Int32(bitPattern: UInt32(truncatingIfNeeded: _raw)) }
+        return Int32(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedU64OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> UInt64? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 8, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return UInt64(truncatingIfNeeded: _raw) }
+        return UInt64(truncatingIfNeeded: v)
+    }
+}
+extension PackedI64OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { _packedIntOptWalkStart(_data, _pos) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Int64? {
+        guard !_bitSet(_data, w.a, idx) else { return nil }
+        guard let (v, isRaw) = _packedIntWalkNext(_data, &w, idx, rawWidth: 8, encBase: w.a + (w.b >> 2), tag: w.b & 3) else { return nil }
+        if isRaw { let _raw = v; return Int64(bitPattern: UInt64(truncatingIfNeeded: _raw)) }
+        return Int64(truncatingIfNeeded: v.fromZigZag)
+    }
+}
+extension PackedF32OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float? {
+        guard !_bitSet(_data, w.a, idx), w.p >= 0 else { return nil }
+        if _mode == 1 {
+            guard let r = _readRawLE(from: _data, at: w.p, width: 4) else { w.p = -1; return nil }
+            w.p += 4
+            return Float(bitPattern: UInt32(truncatingIfNeeded: r))
+        }
+        guard let (v, vB) = try? _decodePackedFloat32(from: _data, at: w.p) else { w.p = -1; return nil }
+        w.p += vB
+        return v
+    }
+}
+extension PackedF64OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Double? {
+        guard !_bitSet(_data, w.a, idx), w.p >= 0 else { return nil }
+        if _mode == 1 {
+            guard let r = _readRawLE(from: _data, at: w.p, width: 8) else { w.p = -1; return nil }
+            w.p += 8
+            return Double(bitPattern: r)
+        }
+        guard let (v, vB) = try? _decodePackedFloat64(from: _data, at: w.p) else { w.p = -1; return nil }
+        w.p += vB
+        return v
+    }
+}
+extension PackedF16OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float? {
+        guard !_bitSet(_data, w.a, idx), w.p >= 0 else { return nil }
+        guard w.p + 1 < _data.count else { w.p = -1; return nil }
+        let bits = UInt16(_data[w.p]) | (UInt16(_data[w.p + 1]) << 8)
+        w.p += 2
+        return _f16BitsToF32(bits)
+    }
+}
+extension PackedBf16OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Float? {
+        guard !_bitSet(_data, w.a, idx), w.p >= 0 else { return nil }
+        guard w.p + 1 < _data.count else { w.p = -1; return nil }
+        let bits = UInt16(_data[w.p]) | (UInt16(_data[w.p + 1]) << 8)
+        w.p += 2
+        return _bf16BitsToF32(bits)
+    }
+}
+extension PackedUtf8OptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> String? {
+        guard !_bitSet(_data, w.a, idx), let r = _walkBlob(_data, &w) else { return nil }
+        return _dagrUTF8(_dagrSlice(_data, r))
+    }
+}
+extension PackedDataOptArrayAccessor: DagrArrayAccessorSequence {
+    public func _walkStart() -> DagrWalk? { DagrWalk(_start + (count + 7) / 8, _start) }
+    public func _walkNext(_ w: inout DagrWalk, _ idx: Int) -> Foundation.Data? {
+        guard !_bitSet(_data, w.a, idx), let r = _walkBlob(_data, &w) else { return nil }
+        return Foundation.Data(_dagrSlice(_data, r))
+    }
+}
 extension VtableBoolArrayAccessor: DagrArrayAccessorSequence {}
 extension VtableBoolOptArrayAccessor: DagrArrayAccessorSequence {}
 extension VtableU8ArrayAccessor: DagrArrayAccessorSequence {}
@@ -3386,6 +3833,128 @@ extension VtableDataArrayAccessor: DagrArrayAccessorSequence {}
 extension VtableUtf8OptArrayAccessor: DagrArrayAccessorSequence {}
 extension VtableDataOptArrayAccessor: DagrArrayAccessorSequence {}
 
+// spec/43: bulk reads — `toArray()` copies a native-LE block in one go.
+extension VtableU8ArrayAccessor {
+    public func toArray() -> [UInt8] {
+        if _elemStart >= 0, let b = _bulkLE(UInt8.self, from: _data, offset: _elemStart, count: count, width: 1) { return b }
+        return Array(self)
+    }
+}
+extension PackedU8ArrayAccessor {
+    public func toArray() -> [UInt8] {
+        if _start >= 0, let b = _bulkLE(UInt8.self, from: _data, offset: _start - _data.startIndex, count: count, width: 1) { return b }
+        return Array(self)
+    }
+}
+extension VtableI8ArrayAccessor {
+    public func toArray() -> [Int8] {
+        if _elemStart >= 0, let b = _bulkLE(Int8.self, from: _data, offset: _elemStart, count: count, width: 1) { return b }
+        return Array(self)
+    }
+}
+extension PackedI8ArrayAccessor {
+    public func toArray() -> [Int8] {
+        if _start >= 0, let b = _bulkLE(Int8.self, from: _data, offset: _start - _data.startIndex, count: count, width: 1) { return b }
+        return Array(self)
+    }
+}
+extension VtableU16ArrayAccessor {
+    public func toArray() -> [UInt16] {
+        if _elemStart >= 0, let b = _bulkLE(UInt16.self, from: _data, offset: _elemStart, count: count, width: 2) { return b }
+        return Array(self)
+    }
+}
+extension PackedU16ArrayAccessor {
+    public func toArray() -> [UInt16] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(UInt16.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 2) { return b }
+        return Array(self)
+    }
+}
+extension VtableI16ArrayAccessor {
+    public func toArray() -> [Int16] {
+        if _elemStart >= 0, let b = _bulkLE(Int16.self, from: _data, offset: _elemStart, count: count, width: 2) { return b }
+        return Array(self)
+    }
+}
+extension PackedI16ArrayAccessor {
+    public func toArray() -> [Int16] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(Int16.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 2) { return b }
+        return Array(self)
+    }
+}
+extension VtableU32ArrayAccessor {
+    public func toArray() -> [UInt32] {
+        if _elemStart >= 0, let b = _bulkLE(UInt32.self, from: _data, offset: _elemStart, count: count, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension PackedU32ArrayAccessor {
+    public func toArray() -> [UInt32] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(UInt32.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension VtableI32ArrayAccessor {
+    public func toArray() -> [Int32] {
+        if _elemStart >= 0, let b = _bulkLE(Int32.self, from: _data, offset: _elemStart, count: count, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension PackedI32ArrayAccessor {
+    public func toArray() -> [Int32] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(Int32.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension VtableU64ArrayAccessor {
+    public func toArray() -> [UInt64] {
+        if _elemStart >= 0, let b = _bulkLE(UInt64.self, from: _data, offset: _elemStart, count: count, width: 8) { return b }
+        return Array(self)
+    }
+}
+extension PackedU64ArrayAccessor {
+    public func toArray() -> [UInt64] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(UInt64.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 8) { return b }
+        return Array(self)
+    }
+}
+extension VtableI64ArrayAccessor {
+    public func toArray() -> [Int64] {
+        if _elemStart >= 0, let b = _bulkLE(Int64.self, from: _data, offset: _elemStart, count: count, width: 8) { return b }
+        return Array(self)
+    }
+}
+extension PackedI64ArrayAccessor {
+    public func toArray() -> [Int64] {
+        if _pos >= 0, let (c, cB) = try? restoreLEB(from: _data, at: _pos), Int(c) & 3 == 1, let b = _bulkLE(Int64.self, from: _data, offset: _pos + cB - _data.startIndex, count: Int(c) >> 2, width: 8) { return b }
+        return Array(self)
+    }
+}
+extension VtableF32ArrayAccessor {
+    public func toArray() -> [Float] {
+        if _elemStart >= 0, let b = _bulkLE(Float.self, from: _data, offset: _elemStart, count: count, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension PackedF32ArrayAccessor {
+    public func toArray() -> [Float] {
+        if _start >= 0, _mode == 1, let b = _bulkLE(Float.self, from: _data, offset: _start - _data.startIndex, count: count, width: 4) { return b }
+        return Array(self)
+    }
+}
+extension VtableF64ArrayAccessor {
+    public func toArray() -> [Double] {
+        if _elemStart >= 0, let b = _bulkLE(Double.self, from: _data, offset: _elemStart, count: count, width: 8) { return b }
+        return Array(self)
+    }
+}
+extension PackedF64ArrayAccessor {
+    public func toArray() -> [Double] {
+        if _start >= 0, _mode == 1, let b = _bulkLE(Double.self, from: _data, offset: _start - _data.startIndex, count: count, width: 8) { return b }
+        return Array(self)
+    }
+}
+
 // ── DataSink runtime types ────────────────────────────────────────────────────
 
 public protocol SinkDestination {
@@ -3404,6 +3973,132 @@ public struct BufferDestination: SinkDestination, Sendable {
     public mutating func write(_ bytes: Foundation.Data) throws { buffer.append(bytes) }
     public mutating func flush() throws {}
 }
+
+// ── The forward path of a sink record (spec/11 §6.1) ─────────────────────────────
+// A record whose fields are all bounded scalars has a size bound, so its `append` writes
+// [type id][size][fields] FRONT TO BACK into one buffer of that bound — no builder, no
+// existential call per store, no copy out of a builder. Each method writes the bytes of the
+// `storePacked` the record's generated store makes for that field kind (the numeric
+// extensions above, `_storePackedF16` / `_storePackedBf16`, `ArenaEnum.storePacked`): change
+// one, change both. `tag` is the field's even tag, index << 1; a raw form writes tag | 1.
+struct SinkForward {
+    let base: UnsafeMutableRawPointer
+    let fields: Int
+    var p: Int
+
+    @inline(__always) init(_ base: UnsafeMutableRawPointer, lead: Int) {
+        self.base = base; fields = lead; p = lead
+    }
+    @inline(__always) mutating func leb(_ value: UInt64) {
+        var v = value
+        while v >= 0x80 {
+            base.storeBytes(of: UInt8(truncatingIfNeeded: v) | 0x80, toByteOffset: p, as: UInt8.self)
+            v >>= 7; p += 1
+        }
+        base.storeBytes(of: UInt8(truncatingIfNeeded: v), toByteOffset: p, as: UInt8.self); p += 1
+    }
+    @inline(__always) mutating func byte(_ v: UInt8) {
+        base.storeBytes(of: v, toByteOffset: p, as: UInt8.self); p += 1
+    }
+    @inline(__always) mutating func le<T: FixedWidthInteger>(_ v: T) {
+        base.storeBytes(of: v.littleEndian, toByteOffset: p, as: T.self); p += MemoryLayout<T>.size
+    }
+    /// A u16..u64 field (an enum's raw value at its width): a LEB under the even tag when shorter
+    /// than the width (and not raw), else the width under the odd tag.
+    @inline(__always) mutating func uint<T: FixedWidthInteger & UnsignedInteger>(_ v: T, tag: UInt64, raw: Bool) {
+        let lv = UInt64(v)
+        if !raw && lebLength(lv) < MemoryLayout<T>.size { leb(tag); leb(lv) } else { leb(tag | 1); le(v) }
+    }
+    /// An i16..i64 field: its ZigZag LEB when shorter than the width, else the two's complement.
+    @inline(__always) mutating func int<T: FixedWidthInteger & SignedInteger>(_ v: T, tag: UInt64, raw: Bool) {
+        let zz = Int64(v).toZigZag
+        if !raw && lebLength(zz) < MemoryLayout<T>.size { leb(tag); leb(zz) } else { leb(tag | 1); le(v) }
+    }
+    /// [tag | 1][byte]: u8, i8, bool and byte-wide enums.
+    @inline(__always) mutating func byteField(_ v: UInt8, tag: UInt64) { leb(tag | 1); byte(v) }
+    /// A `raw` float (spec 39): [tag | 1][4 / 8 bytes].
+    @inline(__always) mutating func rawFloat(_ v: Float, tag: UInt64) { leb(tag | 1); le(v.bitPattern) }
+    @inline(__always) mutating func rawDouble(_ v: Double, tag: UInt64) { leb(tag | 1); le(v.bitPattern) }
+    /// An f16 / bf16 field — `_storePackedF16` / `_storePackedBf16` behind its tag.
+    @inline(__always) mutating func half(_ v: Float, bf16: Bool, tag: UInt64) {
+        if v.isZero { leb(tag); byte(v.sign == .minus ? 0x01 : 0x00); return }
+        if v.isNaN { leb(tag); byte(0x04); return }
+        if v.isInfinite { leb(tag); byte(v.sign == .minus ? 0x03 : 0x02); return }
+        leb(tag | 1); le(bf16 ? _f32ToBf16Bits(v) : _f32ToF16BitsLossy(v))
+    }
+    /// An f32 field — `Float.storePacked` behind its tag (the payload after it, in wire order).
+    @inline(__always) mutating func float(_ v: Float, tag: UInt64) {
+        if v.isZero { leb(tag); byte(v.sign == .minus ? 0x01 : 0x00); return }
+        if v.isNaN { leb(tag); byte(0x04); return }
+        if v.isInfinite { leb(tag); byte(v.sign == .minus ? 0x03 : 0x02); return }
+        if let i = Int32(exactly: v), abs(i) < (1 << 21) {
+            let zz = Int64(i).toZigZag
+            if lebLength(zz) <= 3 { leb(tag); byte(0x05); leb(zz); return }
+        }
+        if let bits16 = _f32ToF16Bits(v) { leb(tag); byte(0x06); le(bits16); return }
+        leb(tag | 1); le(v.bitPattern)
+    }
+    /// An f64 field — `Double.storePacked` behind its tag.
+    @inline(__always) mutating func double(_ v: Double, tag: UInt64) {
+        if v.isZero { leb(tag); byte(v.sign == .minus ? 0x01 : 0x00); return }
+        if v.isNaN { leb(tag); byte(0x04); return }
+        if v.isInfinite { leb(tag); byte(v.sign == .minus ? 0x03 : 0x02); return }
+        if let i = Int64(exactly: v), abs(i) < (1 << 48) {
+            let zz = i.toZigZag
+            if lebLength(zz) <= 7 { leb(tag); byte(0x05); leb(zz); return }
+        }
+        let f32 = Float(v)
+        if Double(f32) == v {
+            if let bits16 = _f32ToF16Bits(f32) { leb(tag); byte(0x06); le(bits16); return }
+            leb(tag); byte(0x07); le(f32.bitPattern); return
+        }
+        leb(tag | 1); le(v.bitPattern)
+    }
+    /// Puts [type id][size] in front of the fields — which move up when the size is shorter than
+    /// its bound — and, doubly linked, the span (an RLEB: the LEB bytes last first) behind them;
+    /// the record's length.
+    mutating func finish(typeId: UInt64, doublyLinked: Bool) -> Int {
+        let body = p - fields
+        p = 0
+        leb(typeId); leb(UInt64(body))
+        if p != fields { (base + p).copyMemory(from: base + fields, byteCount: body) }
+        var end = p + body
+        if doublyLinked {
+            var span = UInt64(end)
+            let n = lebLength(span)
+            for k in stride(from: n - 1, through: 0, by: -1) {
+                var low = UInt8(truncatingIfNeeded: span & 0x7F)
+                span >>= 7
+                if span != 0 { low |= 0x80 }
+                base.storeBytes(of: low, toByteOffset: end + k, as: UInt8.self)
+            }
+            end += n
+        }
+        return end
+    }
+}
+
+// ── DataSink stream introspection ("spec/34-meta-records-and-stream-introspection.md") ──
+
+/// One appended / read sink record's byte range, RELATIVE to `recordsStart` (the byte
+/// after the framing word and optional header). `end` is exclusive and includes the
+/// trailing RLEB span on a doubly-linked sink, so consecutive ranges tile the record region.
+public struct SinkRecordRange: Sendable, Hashable {
+    public let typeId: Int
+    public let start: Int
+    public let end: Int
+    public init(typeId: Int, start: Int, end: Int) { self.typeId = typeId; self.start = start; self.end = end }
+    public var count: Int { end - start }
+    /// 34 §4.2 — a meta record (about the stream, not in it).
+    public var isMeta: Bool { isMetaTypeId(typeId) }
+}
+
+/// Reserved meta-record typeId band (34 §2.1): `meta_types[i]` ↔ `metaTypeIdBase + i`.
+public let metaTypeIdBase = 16384
+public let metaTypeIdEnd = 32767
+
+/// 34 §4.2 — true iff `typeId` addresses a meta record.
+@inline(__always) public func isMetaTypeId(_ typeId: Int) -> Bool { typeId >= metaTypeIdBase && typeId <= metaTypeIdEnd }
 
 public func encodeLEB128(_ value: UInt64) -> Foundation.Data {
     if value == 0 { return Foundation.Data([0]) }

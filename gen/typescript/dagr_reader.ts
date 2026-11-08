@@ -1,8 +1,8 @@
 // Dagr lazy-read runtime primitives (TypeScript).
 //
 // Ported byte-for-byte from the Swift/Rust generated runtime
-// (Sources/RethinkingDagr/DagrRuntime.swift). This is the Phase 0 spike surface
-// (see "20 TypeScript Codegen Plan.md" §7): just enough of the wire primitives
+// (targets/swift/Sources/DagrExample/DagrRuntime.swift). This is the Phase 0 spike surface
+// (see "spec/21-typescript-codegen-plan.md" §7): just enough of the wire primitives
 // to lazily read a regular (vtable) node of required scalars.
 //
 // Reader model (plan §8.1): hold BOTH a Uint8Array (varint / byte hot path) and
@@ -19,14 +19,14 @@ export class DagrError extends Error {
 /** Buffer pair: byte view for varints, DataView for fixed-width reads. */
 export class Buf {
   readonly u8: Uint8Array;
-  readonly dv: DataView;
+  private _dv: DataView | null = null;
   constructor(bytes: Uint8Array) {
     this.u8 = bytes;
-    // #1 footgun (plan §8.1): view the SAME region, honoring byteOffset /
-    // byteLength. A Node Buffer (or any subarray) can carry a nonzero
-    // byteOffset; `new DataView(bytes.buffer)` alone would make every offset
-    // wrong.
-    this.dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+  /** A DataView of the same region (#1 footgun, plan §8.1: honoring byteOffset /
+   *  byteLength), built on first use: the reads below take bytes from `u8`. */
+  get dv(): DataView {
+    return this._dv ??= new DataView(this.u8.buffer, this.u8.byteOffset, this.u8.byteLength);
   }
 }
 
@@ -39,8 +39,14 @@ export class Buf {
  *
  * Mirrors restoreLEB(from:at:) in DagrRuntime.swift.
  */
+// The pair is one module-level array, overwritten by the next call: every caller destructures
+// or indexes it at once. A new array per varint was ~8% of a TypeScript client's read (V8 did not
+// elide it).
+const _leb: [number, number] = [0, 0];
 export function readLEB(buf: Buf, at: number): [number, number] {
   if (at < 0) throw new DagrError("outsideOfBuffer");
+  const u8 = buf.u8;
+  if (at < u8.length && u8[at]! < 0x80) { _leb[0] = u8[at]!; _leb[1] = 1; return _leb; }   // one-byte fast path (tags, lengths)
   let pos = at;
   let result = 0;
   let shift = 0;
@@ -54,7 +60,7 @@ export function readLEB(buf: Buf, at: number): [number, number] {
     pos += 1;
     if (b >> 7 === 0) break;
   }
-  return [result, pos - at];
+  _leb[0] = result; _leb[1] = pos - at; return _leb;
 }
 
 /**
@@ -71,9 +77,20 @@ export function zigzagDecode(n: number): number {
  */
 export function readLEBBig(buf: Buf, at: number): [bigint, number] {
   if (at < 0) throw new DagrError("outsideOfBuffer");
+  // Accumulate in a number while it stays exact (7 groups = 49 bits), so a typical i64
+  // (a timestamp, a price) costs one BigInt conversion instead of BigInt ops per byte.
+  const u8 = buf.u8;
   let pos = at;
-  let result = 0n;
-  let shift = 0n;
+  let small = 0;
+  for (let k = 0; k < 7; k++) {
+    if (pos >= u8.length) throw new DagrError("outsideOfBuffer");
+    const b = u8[pos]!;
+    small += (b & 0x7f) * 2 ** (7 * k);
+    pos += 1;
+    if (b >> 7 === 0) return [BigInt(small), pos - at];
+  }
+  let result = BigInt(small);
+  let shift = 49n;
   for (;;) {
     if (pos >= buf.u8.length) throw new DagrError("outsideOfBuffer");
     const b = buf.u8[pos]!;
@@ -105,12 +122,12 @@ export function readV62(buf: Buf, at: number): [number, number] {
     case 0:
       return [buf.u8[at]! >>> 2, 1];
     case 1:
-      return [buf.dv.getUint16(at, true) >>> 2, 2];
+      return [readU16(buf, at) >>> 2, 2];
     case 2:
       // Divide, not `>>> 2`: a full 32-bit value would lose its top bits.
-      return [Math.floor(buf.dv.getUint32(at, true) / 4), 4];
+      return [Math.floor(readU32(buf, at) / 4), 4];
     default:
-      return [Number(buf.dv.getBigUint64(at, true) >> 2n), 8];
+      return [Number(readU64(buf, at) >> 2n), 8];
   }
 }
 
@@ -135,12 +152,12 @@ export function restoreRTypeVTable(buf: Buf, start: number): (number | null)[] {
   const adj = (offsetValue & 1) === 0 ? b1 : 0;
   const vtStart = start + zigzagDecode(offsetValue) + adj;
   const [vtSize, b2] = readLEB(buf, vtStart);
-  const count = vtSize >> 1;
-  const wide = (vtSize & 1) !== 0;
+  const wide = vtSize % 2 === 1;
   let cursor = vtStart + b2;
+  const count = wireCount(buf, cursor, Math.floor(vtSize / 2), wide ? 16 : 8);
   const result: (number | null)[] = [];
   for (let i = 0; i < count; i++) {
-    const v = wide ? buf.dv.getUint16(cursor, true) : buf.u8[cursor]!;
+    const v = wide ? readU16(buf, cursor) : buf.u8[cursor]!;
     result.push(v === 0 ? null : v - 1 + b1);
     cursor += wide ? 2 : 1;
   }
@@ -153,19 +170,40 @@ export function restoreRTypeVTable(buf: Buf, start: number): (number | null)[] {
 // Phase 1 fork.) These mirror the UIntN/IntN `restore(from:at:)` extensions.
 
 function bounds(buf: Buf, at: number, width: number): void {
-  if (at < 0 || at + width > buf.u8.length) throw new DagrError("outsideOfBuffer");
+  // negated, so a NaN position (from a hostile length) fails too
+  if (!(at >= 0 && at + width <= buf.u8.length)) throw new DagrError("outsideOfBuffer");
 }
 
-export function readU8(buf: Buf, at: number): number { bounds(buf, at, 1); return buf.dv.getUint8(at); }
-export function readU16(buf: Buf, at: number): number { bounds(buf, at, 2); return buf.dv.getUint16(at, true); }
-export function readU32(buf: Buf, at: number): number { bounds(buf, at, 4); return buf.dv.getUint32(at, true); }
-export function readU64(buf: Buf, at: number): bigint { bounds(buf, at, 8); return buf.dv.getBigUint64(at, true); }
-export function readI8(buf: Buf, at: number): number { bounds(buf, at, 1); return buf.dv.getInt8(at); }
-export function readI16(buf: Buf, at: number): number { bounds(buf, at, 2); return buf.dv.getInt16(at, true); }
-export function readI32(buf: Buf, at: number): number { bounds(buf, at, 4); return buf.dv.getInt32(at, true); }
-export function readI64(buf: Buf, at: number): bigint { bounds(buf, at, 8); return buf.dv.getBigInt64(at, true); }
-export function readF32(buf: Buf, at: number): number { bounds(buf, at, 4); return buf.dv.getFloat32(at, true); }
-export function readF64(buf: Buf, at: number): number { bounds(buf, at, 8); return buf.dv.getFloat64(at, true); }
+/**
+ * A count read off the wire, checked before anything loops over it (spec/38 §10.1): `count`
+ * elements of at least `bitsPerElem` bits each must fit in the bytes from `at`, else the buffer
+ * is malformed. Without it a hostile count loops for as long as it says — a read past the end
+ * is `undefined`, not an error — or allocates an array that long.
+ */
+export function wireCount(buf: Buf, at: number, count: number, bitsPerElem: number): number {
+  if (!(count >= 0 && count * bitsPerElem <= (buf.u8.length - at) * 8)) throw new DagrError("outsideOfBuffer");
+  return count;
+}
+
+// 64-bit integers and floats: their bytes copied into one scratch view (a DataView per Buf
+// cost an allocation per record; the bytes are already bounds-checked by the caller)
+const _s8u = new Uint8Array(8);
+const _s8v = new DataView(_s8u.buffer);
+function _s8(buf: Buf, at: number, n = 8): DataView {
+  const u = buf.u8;
+  for (let i = 0; i < n; i++) _s8u[i] = u[at + i]!;
+  return _s8v;
+}
+export function readU8(buf: Buf, at: number): number { bounds(buf, at, 1); return buf.u8[at]!; }
+export function readU16(buf: Buf, at: number): number { bounds(buf, at, 2); const u = buf.u8; return u[at]! | (u[at + 1]! << 8); }
+export function readU32(buf: Buf, at: number): number { bounds(buf, at, 4); const u = buf.u8; return (u[at]! | (u[at + 1]! << 8) | (u[at + 2]! << 16) | (u[at + 3]! << 24)) >>> 0; }
+export function readU64(buf: Buf, at: number): bigint { bounds(buf, at, 8); return _s8(buf, at).getBigUint64(0, true); }
+export function readI8(buf: Buf, at: number): number { bounds(buf, at, 1); return (buf.u8[at]! << 24) >> 24; }
+export function readI16(buf: Buf, at: number): number { bounds(buf, at, 2); const u = buf.u8; return ((u[at]! | (u[at + 1]! << 8)) << 16) >> 16; }
+export function readI32(buf: Buf, at: number): number { bounds(buf, at, 4); const u = buf.u8; return u[at]! | (u[at + 1]! << 8) | (u[at + 2]! << 16) | (u[at + 3]! << 24); }
+export function readI64(buf: Buf, at: number): bigint { bounds(buf, at, 8); return _s8(buf, at).getBigInt64(0, true); }
+export function readF32(buf: Buf, at: number): number { bounds(buf, at, 4); return _s8(buf, at, 4).getFloat32(0, true); }
+export function readF64(buf: Buf, at: number): number { bounds(buf, at, 8); return _s8(buf, at).getFloat64(0, true); }
 
 // ── Half-precision helpers (f16 / bf16) ──────────────────────────────────────
 // f16/bf16 have no fully-portable native reads, so they are done by hand
@@ -206,8 +244,8 @@ export function bf16BitsToF32(b: number): number {
   return f32FromBits((b << 16) >>> 0);
 }
 
-export function readF16(buf: Buf, at: number): number { bounds(buf, at, 2); return f16BitsToF32(buf.dv.getUint16(at, true)); }
-export function readBf16(buf: Buf, at: number): number { bounds(buf, at, 2); return bf16BitsToF32(buf.dv.getUint16(at, true)); }
+export function readF16(buf: Buf, at: number): number { bounds(buf, at, 2); const u = buf.u8; return f16BitsToF32(u[at]! | (u[at + 1]! << 8)); }
+export function readBf16(buf: Buf, at: number): number { bounds(buf, at, 2); const u = buf.u8; return bf16BitsToF32(u[at]! | (u[at + 1]! << 8)); }
 
 /** ZigZag decode without the 32-bit `^` (safe for the leb-int float path). */
 export function zigzagDecodeNum(n: number): number {
@@ -237,8 +275,8 @@ export function decodePackedFloat32(buf: Buf, at: number): [number, number] {
     case 0x03: return [-Infinity, 1];
     case 0x04: return [NaN, 1];
     case 0x05: { const [zz, b] = readLEB(buf, at + 1); return [zigzagDecodeNum(zz), 1 + b]; }
-    case 0x06: return [f16BitsToF32(buf.dv.getUint16(at + 1, true)), 3];
-    case 0x07: return [buf.dv.getFloat32(at + 1, true), 5];
+    case 0x06: return [f16BitsToF32(readU16(buf, at + 1)), 3];
+    case 0x07: return [readF32(buf, at + 1), 5];
     default: return [0.0, 1];
   }
 }
@@ -253,9 +291,9 @@ export function decodePackedFloat64(buf: Buf, at: number): [number, number] {
     case 0x03: return [-Infinity, 1];
     case 0x04: return [NaN, 1];
     case 0x05: { const [zz, b] = readLEB(buf, at + 1); return [zigzagDecodeNum(zz), 1 + b]; }
-    case 0x06: return [f16BitsToF32(buf.dv.getUint16(at + 1, true)), 3];
-    case 0x07: return [buf.dv.getFloat32(at + 1, true), 5];  // f32 widened to f64
-    case 0x08: return [buf.dv.getFloat64(at + 1, true), 9];
+    case 0x06: return [f16BitsToF32(readU16(buf, at + 1)), 3];
+    case 0x07: return [readF32(buf, at + 1), 5];  // f32 widened to f64
+    case 0x08: return [readF64(buf, at + 1), 9];
     default: return [0.0, 1];
   }
 }
@@ -284,8 +322,9 @@ export function readFixedArrayAt<T>(
   read: (b: Buf, p: number) => T,
   width: number,
 ): [T[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const base = at + cB;
+  const count = wireCount(buf, base, c, 8 * width);
   const out: T[] = [];
   for (let i = 0; i < count; i++) out.push(read(buf, base + i * width));
   return [out, cB + count * width];
@@ -301,8 +340,9 @@ export function readFixedArrayAt<T>(
 // Mirrors the sub-byte branch of Vtable/Packed{Enum}ArrayAccessor. Returns
 // [rawValues, bytesConsumed].
 export function readEnumBitArrayAt(buf: Buf, at: number, bits: number): [number[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const base = at + cB;
+  const count = wireCount(buf, base, c, bits);
   const perByte = 8 / bits;
   const mask = (1 << bits) - 1;
   const out: number[] = [];
@@ -313,7 +353,7 @@ export function readEnumBitArrayAt(buf: Buf, at: number, bits: number): [number[
   return [out, cB + Math.ceil((count * bits) / 8)];
 }
 
-// Raw embedded-graph leaf ("17 Raw Embedded Graphs.md" §4). A `raw` node-ref
+// Raw embedded-graph leaf ("spec/18-raw-embedded-graphs.md" §4). A `raw` node-ref
 // field in a packed stream is a variable-size entry `[LEB payloadLen][payload]`;
 // the payload is `[padByte][standalone .dagr blob][trailing pad]` when the target
 // is alignment-bearing (`global_max_N > 1`), else just `[blob]`. `pos` = start of
@@ -343,6 +383,42 @@ export function packedUnionPayloadBytes(buf: Buf, ep: number, code: number): num
   }
 }
 
+// An ENUM variant of a packed union, decoded by the header `code` (spec 07 §8): the
+// variant is stored like an enum FIELD of a packed node — a byte-wide enum as one raw
+// byte (code 1), a wider one as a LEB (code 0) when that is shorter than its backing
+// width, else the backing width (code 2 / 3 / 4). Going by the code rather than by the
+// schema width also reads what writers before spec 42 stored: ONE byte under code 1,
+// whatever the enum's width.
+export function readPackedUnionEnum(buf: Buf, ep: number, code: number): number {
+  switch (code) {
+    case 0: return readLEB(buf, ep)[0];
+    case 1: return readU8(buf, ep);
+    case 2: return readU16(buf, ep);
+    case 3: return readU32(buf, ep);
+    default: return Number(readU64(buf, ep));
+  }
+}
+/** `readPackedUnionEnum` for a u64-backed enum (the value is a bigint). */
+export function readPackedUnionEnumBig(buf: Buf, ep: number, code: number): bigint {
+  switch (code) {
+    case 0: return readLEBBig(buf, ep)[0];
+    case 1: return BigInt(readU8(buf, ep));
+    case 2: return BigInt(readU16(buf, ep));
+    case 3: return BigInt(readU32(buf, ep));
+    default: return readU64(buf, ep);
+  }
+}
+
+// An f16 / bf16 variant of a packed union (spec 07 §8): ALWAYS its two raw bytes under
+// code 2. Writers before spec 42 stored the 16 bits as a LEB under code 0 when they were
+// below 128 (`+0.0` was one zero byte); that is a varint of the BITS — not the special
+// value tag of the f16 field codec, which agrees with it for `+0.0` only.
+export function readPackedUnionF16Bits(buf: Buf, ep: number, code: number): number {
+  if (code === 0) return readLEB(buf, ep)[0] & 0xffff;
+  bounds(buf, ep, 2);
+  const u = buf.u8; return u[ep]! | (u[ep + 1]! << 8);
+}
+
 // Packed node-ref array: [LEB count][opt nil bitset][ (LEB blockLen + child
 // packed data) per present element ]. Each child is read at the blockLen
 // position (its packed accessor consumes the blockLen itself); the array
@@ -351,8 +427,9 @@ export function packedUnionPayloadBytes(buf: Buf, ep: number, code: number): num
 export function readPackedNodeArrayAt<T>(
   buf: Buf, countPos: number, makeChild: (b: Buf, p: number) => T, opt: boolean,
 ): (T | null)[] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, opt ? 1 : 8);
   const bsNil = opt ? ((count + 7) >> 3) : 0;
   let p = nilStart + bsNil;
   const out: (T | null)[] = [];
@@ -371,6 +448,7 @@ export function readPackedNodeArrayAt<T>(
 // their typed value straight from the slot position instead. Offsets stay well
 // under 2^53, so a plain number is safe even at es=8.
 export function readRelOffsetU(buf: Buf, at: number, es: number): number {
+  bounds(buf, at, es);
   let v = 0;
   for (let k = 0; k < es; k++) v += buf.u8[at + k]! * 2 ** (8 * k);
   return v;
@@ -379,6 +457,7 @@ export function readRelOffsetU(buf: Buf, at: number, es: number): number {
 /** BigInt es-byte little-endian read — for 64-bit union-array value variants
  * (u64/i64/f64), whose slot value may exceed 2^53. */
 export function readRelOffsetUBig(buf: Buf, at: number, es: number): bigint {
+  bounds(buf, at, es);
   let v = 0n;
   for (let k = 0; k < es; k++) v += BigInt(buf.u8[at + k]!) << BigInt(8 * k);
   return v;
@@ -411,8 +490,9 @@ export function unionSlotBytes(buf: Buf, at: number): number {
 // [value bitset], the value bitset indexed by i (not compacted). Mirrors
 // _restoreBoolArrayOpt. Returns [(boolean|null)[], bytesConsumed].
 export function readBoolOptArrayAt(buf: Buf, at: number): [(boolean | null)[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const nilStart = at + cB;
+  const count = wireCount(buf, nilStart, c, 2);
   const bs = (count + 7) >> 3;
   const valStart = nilStart + bs;
   const out: (boolean | null)[] = [];
@@ -427,8 +507,9 @@ export function readBoolOptArrayAt(buf: Buf, at: number): [(boolean | null)[], n
 // [compacted value bitset] — value bit ci counts only present elements. Mirrors
 // _restorePackedBoolOptArray.
 export function readPackedBoolOptArrayAt(buf: Buf, countPos: number): [(boolean | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   const bs = (count + 7) >> 3;
   const valStart = nilStart + bs;
   const out: (boolean | null)[] = [];
@@ -445,8 +526,9 @@ export function readPackedBoolOptArrayAt(buf: Buf, countPos: number): [(boolean 
 // (plain count, one compacted byte per present element). Mirrors
 // PackedU8OptArrayAccessor / PackedI8OptArrayAccessor. `signed` → i8.
 export function readPackedByteOptArrayAt(buf: Buf, countPos: number, signed: boolean): [(number | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   let p = nilStart + ((count + 7) >> 3);
   const out: (number | null)[] = [];
   for (let i = 0; i < count; i++) {
@@ -461,13 +543,14 @@ export function readPackedByteOptArrayAt(buf: Buf, countPos: number, signed: boo
 // self-describing special-value tag (decodePackedF16, 1 byte). Mirrors
 // _restorePackedF16Array. `conv` maps raw u16 bits → number.
 export function readPackedF16ArrayAt(buf: Buf, countPos: number, conv: (b: number) => number): [number[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const encStart = countPos + cB;
+  const count = wireCount(buf, encStart, c, 9);
   let p = encStart + ((count + 7) >> 3);
   const out: number[] = [];
   for (let i = 0; i < count; i++) {
     const isRaw = ((buf.u8[encStart + (i >> 3)]! >> (i & 7)) & 1) !== 0;
-    if (isRaw) { out.push(conv(buf.dv.getUint16(p, true))); p += 2; }
+    if (isRaw) { out.push(conv(readU16(buf, p))); p += 2; }
     else { const [v, b] = decodePackedF16(buf, p); out.push(v); p += b; }
   }
   return [out, p - countPos];
@@ -477,13 +560,14 @@ export function readPackedF16ArrayAt(buf: Buf, countPos: number, conv: (b: numbe
 // present elements] (no enc bitset — present elems always raw). Mirrors
 // _restorePackedF16OptArray.
 export function readPackedF16OptArrayAt(buf: Buf, countPos: number, conv: (b: number) => number): [(number | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   let p = nilStart + ((count + 7) >> 3);
   const out: (number | null)[] = [];
   for (let i = 0; i < count; i++) {
     if ((buf.u8[nilStart + (i >> 3)]! >> (i & 7)) & 1) { out.push(null); continue; }
-    out.push(conv(buf.dv.getUint16(p, true))); p += 2;
+    out.push(conv(readU16(buf, p))); p += 2;
   }
   return [out, p - countPos];
 }
@@ -494,8 +578,9 @@ export function readPackedF16OptArrayAt(buf: Buf, countPos: number, conv: (b: nu
 export function readPackedComplexArrayAt<T>(
   buf: Buf, countPos: number, readElem: (b: Buf, p: number) => [T, number],
 ): [T[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   let p = countPos + cB;
+  const count = wireCount(buf, p, c, 8);
   const out: T[] = [];
   for (let i = 0; i < count; i++) { const [v, b] = readElem(buf, p); out.push(v); p += b; }
   return [out, p - countPos];
@@ -506,8 +591,9 @@ export function readPackedComplexArrayAt<T>(
 export function readPackedComplexOptArrayAt<T>(
   buf: Buf, countPos: number, readElem: (b: Buf, p: number) => [T, number],
 ): [(T | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   let p = nilStart + ((count + 7) >> 3);
   const out: (T | null)[] = [];
   for (let i = 0; i < count; i++) {
@@ -522,8 +608,9 @@ export function readPackedComplexOptArrayAt<T>(
 // [LEB count][nil bitset][value bitset]. Mirrors _restoreEnumBitsetArrayOpt /
 // _restoreEnumBitsetArrayOptCompacted.
 export function readEnumBitOptArrayAt(buf: Buf, at: number, bits: number, compacted: boolean): [(number | null)[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const nilStart = at + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   const bsNil = (count + 7) >> 3;
   const valStart = nilStart + bsNil;
   const perByte = 8 / bits;
@@ -544,8 +631,9 @@ export function readEnumBitOptArrayAt(buf: Buf, at: number, bits: number, compac
 // present rawValues]. Mirrors _restorePackedEnumRawOptArray. `big` selects the
 // BigInt LEB reader (u64-backed enums).
 export function readPackedEnumRawOptArrayAt(buf: Buf, countPos: number): [(number | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   let p = nilStart + ((count + 7) >> 3);
   const out: (number | null)[] = [];
   for (let i = 0; i < count; i++) {
@@ -556,8 +644,9 @@ export function readPackedEnumRawOptArrayAt(buf: Buf, countPos: number): [(numbe
 }
 
 export function readPackedEnumRawOptArrayAtBig(buf: Buf, countPos: number): [(bigint | null)[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, c, 1);
   let p = nilStart + ((count + 7) >> 3);
   const out: (bigint | null)[] = [];
   for (let i = 0; i < count; i++) {
@@ -573,8 +662,9 @@ export function readPackedEnumRawOptArrayAtBig(buf: Buf, countPos: number): [(bi
 // _restorePackedEnumRawArray. Returns [rawValues, bytesConsumed]. Sub-byte enums
 // use readEnumBitArrayAt in packed nodes too (identical [count][bitset]).
 export function readPackedEnumRawArrayAt(buf: Buf, countPos: number): [number[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   let p = countPos + cB;
+  const count = wireCount(buf, p, c, 8);
   const out: number[] = [];
   for (let i = 0; i < count; i++) { const [v, b] = readLEB(buf, p); out.push(v); p += b; }
   return [out, p - countPos];
@@ -582,8 +672,9 @@ export function readPackedEnumRawArrayAt(buf: Buf, countPos: number): [number[],
 
 /** BigInt variant of readPackedEnumRawArrayAt (u64-backed enums, e.g. BitCap64). */
 export function readPackedEnumRawArrayAtBig(buf: Buf, countPos: number): [bigint[], number] {
-  const [count, cB] = readLEB(buf, countPos);
+  const [c, cB] = readLEB(buf, countPos);
   let p = countPos + cB;
+  const count = wireCount(buf, p, c, 8);
   const out: bigint[] = [];
   for (let i = 0; i < count; i++) { const [v, b] = readLEBBig(buf, p); out.push(v); p += b; }
   return [out, p - countPos];
@@ -615,9 +706,9 @@ export function readPackedIntArrayAt<T>(
   lebFn: (b: Buf, p: number) => [T, number],
 ): [T[], number] {
   const [c, cB] = readLEB(buf, countPos);
-  const count = Math.floor(c / 4);   // c >> 2
-  const tag = c % 4;                  // c & 3
   const encStart = countPos + cB;
+  const count = wireCount(buf, encStart, Math.floor(c / 4), 8);   // c >> 2
+  const tag = c % 4;                  // c & 3
   let p = encStart + (tag === 2 ? ((count + 7) >> 3) : 0);
   const out: T[] = [];
   for (let i = 0; i < count; i++) {
@@ -640,9 +731,9 @@ export function readPackedFloatArrayAt(
   rawWidth: number,
 ): [number[], number] {
   const [c, cB] = readLEB(buf, countPos);
-  const count = Math.floor(c / 4);  // header = (count << 2) | mode
-  const mode = c % 4;               // 0 = packed self-describing, 1 = raw native-LE
   let p = countPos + cB;
+  const count = wireCount(buf, p, Math.floor(c / 4), 8);  // header = (count << 2) | mode
+  const mode = c % 4;               // 0 = packed self-describing, 1 = raw native-LE
   const out: number[] = [];
   if (mode === 1) {
     const rd = rawWidth === 8 ? readF64 : readF32;
@@ -660,19 +751,19 @@ export function readPackedFloatArrayAt(
 // pointer-table branch of Array.restore.
 
 function _relOffsetU(buf: Buf, at: number, es: number): number {
-  if (es === 1) return buf.u8[at]!;
-  if (es === 2) return buf.dv.getUint16(at, true);
-  if (es === 4) return buf.dv.getUint32(at, true);
-  return Number(buf.dv.getBigUint64(at, true));
+  if (es === 1) return readU8(buf, at);
+  if (es === 2) return readU16(buf, at);
+  if (es === 4) return readU32(buf, at);
+  return Number(readU64(buf, at));
 }
 
 // Node-ref slots are signed (two's-complement) so a slot can point backward to a
 // shared/cyclic node; value (utf8/data) slots are unsigned. 0 = nil either way.
 function _relOffsetS(buf: Buf, at: number, es: number): number {
-  if (es === 1) return buf.dv.getInt8(at);
-  if (es === 2) return buf.dv.getInt16(at, true);
-  if (es === 4) return buf.dv.getInt32(at, true);
-  return Number(buf.dv.getBigInt64(at, true));
+  if (es === 1) return readI8(buf, at);
+  if (es === 2) return readI16(buf, at);
+  if (es === 4) return readI32(buf, at);
+  return Number(readI64(buf, at));
 }
 
 // Returns `(T | null)[]`: slot 0 encodes a nil element (arrayWithOptionals). Plain
@@ -684,9 +775,9 @@ export function readPtrTableArrayAt<T>(
   signed = false,
 ): (T | null)[] {
   const [hdr, hB] = readLEB(buf, at);
-  const count = Math.floor(hdr / 4);   // hdr >> 2
   const es = [1, 2, 4, 8][hdr % 4]!;    // wc = hdr & 3
   const tableBase = at + hB;
+  const count = wireCount(buf, tableBase, Math.floor(hdr / 4), 8 * es);   // hdr >> 2
   const base = tableBase + count * es;
   const rel = signed ? _relOffsetS : _relOffsetU;
   const out: (T | null)[] = [];
@@ -706,9 +797,9 @@ export function readPackedIntOptArrayAt<T>(
   lebFn: (b: Buf, p: number) => [T, number],
 ): [(T | null)[], number] {
   const [c, cB] = readLEB(buf, countPos);
-  const count = Math.floor(c / 4);
-  const tag = c % 4;
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, Math.floor(c / 4), 1);
+  const tag = c % 4;
   const bsCnt = (count + 7) >> 3;
   const encStart = nilStart + bsCnt;
   let p = encStart + (tag === 2 ? bsCnt : 0);
@@ -729,9 +820,9 @@ export function readPackedFloatOptArrayAt(
   rawWidth: number,
 ): [(number | null)[], number] {
   const [c, cB] = readLEB(buf, countPos);
-  const count = Math.floor(c / 4);  // header = (count << 2) | mode
-  const mode = c % 4;               // 0 = packed self-describing, 1 = raw native-LE
   const nilStart = countPos + cB;
+  const count = wireCount(buf, nilStart, Math.floor(c / 4), 1);  // header = (count << 2) | mode
+  const mode = c % 4;               // 0 = packed self-describing, 1 = raw native-LE
   let p = nilStart + ((count + 7) >> 3);
   const out: (number | null)[] = [];
   const rd = rawWidth === 8 ? readF64 : readF32;
@@ -745,8 +836,9 @@ export function readPackedFloatOptArrayAt(
 
 // ── Bool arrays: [LEB count][bitset ceil(count/8)] (bit i = element i) ────────
 export function readBoolArrayAt(buf: Buf, at: number): [boolean[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const bsStart = at + cB;
+  const count = wireCount(buf, bsStart, c, 1);
   const out: boolean[] = [];
   for (let i = 0; i < count; i++) out.push(((buf.u8[bsStart + (i >> 3)]! >> (i & 7)) & 1) !== 0);
   return [out, cB + ((count + 7) >> 3)];
@@ -762,8 +854,9 @@ export function readOptFixedArrayAt<T>(
   read: (b: Buf, p: number) => T,
   width: number,
 ): [(T | null)[], number] {
-  const [count, cB] = readLEB(buf, at);
+  const [c, cB] = readLEB(buf, at);
   const bsStart = at + cB;
+  const count = wireCount(buf, bsStart, c, 8 * width);
   const bsLen = (count + 7) >> 3;
   const base = bsStart + bsLen;
   const out: (T | null)[] = [];
@@ -779,13 +872,37 @@ export function readOptFixedArrayAt<T>(
 // inline (packed / frozen-packed) callers can advance a cursor; forward-pointer
 // (frozen / regular) callers ignore the count.
 
-const _utf8Decoder = new TextDecoder();
+// fatal: invalid UTF-8 is a DagrError, never replaced with U+FFFD (spec/49 U1, U2)
+const _utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+/** The bytes as text; DagrError("invalidUtf8") when they are not well-formed UTF-8. */
+export function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    return _utf8Decoder.decode(bytes);
+  } catch {
+    throw new DagrError("invalidUtf8");
+  }
+}
 
 export function readUtf8At(buf: Buf, at: number): [string, number] {
   const [len, lenB] = readLEB(buf, at);
   const start = at + lenB;
-  if (start + len > buf.u8.length) throw new DagrError("outsideOfBuffer");
-  return [_utf8Decoder.decode(buf.u8.subarray(start, start + len)), lenB + len];
+  const u8 = buf.u8;
+  if (start + len > u8.length) throw new DagrError("outsideOfBuffer");
+  // Short ASCII strings: build directly — TextDecoder's per-call overhead dominates a
+  // small string. Anything else (or on the first non-ASCII byte) goes to TextDecoder.
+  if (len <= 32) {
+    let s = "";
+    let i = start;
+    const end = start + len;
+    for (; i < end; i++) {
+      const c = u8[i]!;
+      if (c >= 0x80) break;
+      s += String.fromCharCode(c);
+    }
+    if (i === end) return [s, lenB + len];
+  }
+  return [decodeUtf8(u8.subarray(start, start + len)), lenB + len];
 }
 
 export function readDataAt(buf: Buf, at: number): [Uint8Array, number] {
