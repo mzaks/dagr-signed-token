@@ -1,0 +1,487 @@
+{
+  "library": {
+    "graphs": {
+      "Token": {
+        "header": {
+          "fields": [
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "algorithm",
+              "options": 1,
+              "timestamp": null,
+              "type": {
+                "kind": "utf8"
+              }
+            },
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "keyId",
+              "options": 0,
+              "timestamp": null,
+              "type": {
+                "kind": "utf8"
+              }
+            },
+            {
+              "alignment": null,
+              "capacity": null,
+              "default": null,
+              "index": null,
+              "name": "signature",
+              "options": 1,
+              "timestamp": null,
+              "type": {
+                "kind": "data"
+              }
+            }
+          ],
+          "frozen": false,
+          "kind": "node",
+          "name": "Jws",
+          "packed": false,
+          "prefabs": {}
+        },
+        "imports": [],
+        "name": "Token",
+        "node_types": [
+          {
+            "fields": [
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "subject",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "issuer",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "audience",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "issuedAt",
+                "options": 1,
+                "timestamp": {
+                  "epoch": "unix",
+                  "unit": "s"
+                },
+                "type": {
+                  "kind": "u64"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "expiresAt",
+                "options": 1,
+                "timestamp": {
+                  "epoch": "unix",
+                  "unit": "s"
+                },
+                "type": {
+                  "kind": "u64"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "scopes",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "inner": {
+                    "kind": "utf8"
+                  },
+                  "kind": "array"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "custom",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "ref",
+                  "ref": "Json"
+                }
+              }
+            ],
+            "frozen": true,
+            "kind": "node",
+            "name": "Claims",
+            "packed": true,
+            "prefabs": {}
+          },
+          {
+            "fields": [
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "key",
+                "options": 1,
+                "timestamp": null,
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "alignment": null,
+                "capacity": null,
+                "default": null,
+                "index": null,
+                "name": "value",
+                "options": 0,
+                "timestamp": null,
+                "type": {
+                  "kind": "ref",
+                  "ref": "Json"
+                }
+              }
+            ],
+            "frozen": true,
+            "kind": "node",
+            "name": "JsonMember",
+            "packed": true,
+            "prefabs": {}
+          },
+          {
+            "capacity": 16,
+            "kind": "union",
+            "name": "Json",
+            "types": [
+              {
+                "name": "string",
+                "type": {
+                  "kind": "utf8"
+                }
+              },
+              {
+                "name": "number",
+                "type": {
+                  "kind": "f64"
+                }
+              },
+              {
+                "name": "bool",
+                "type": {
+                  "kind": "bool"
+                }
+              },
+              {
+                "name": "array",
+                "type": {
+                  "inner": {
+                    "kind": "ref",
+                    "ref": "Json"
+                  },
+                  "kind": "arrayWithOptionals"
+                }
+              },
+              {
+                "name": "object",
+                "type": {
+                  "inner": {
+                    "kind": "ref",
+                    "ref": "JsonMember"
+                  },
+                  "kind": "array"
+                }
+              },
+              {
+                "name": "data",
+                "type": {
+                  "kind": "data"
+                }
+              }
+            ]
+          }
+        ],
+        "root_type": {
+          "kind": "ref",
+          "ref": "Claims"
+        }
+      }
+    },
+    "ir_version": 1,
+    "name": "dagr-signed-token",
+    "schemas": [
+      {
+        "kind": "graph",
+        "name": "Token"
+      }
+    ],
+    "shared_buffers": {},
+    "sinks": {},
+    "wire_format_version": 1
+  },
+  "library_hash": "sha256:cc3f040ade31279e58fff92eb51bee186d082164fad096a6c79d479dab1a6abb",
+  "outputs": {
+    "gen/c/CMakeLists.txt": "sha256:bde2cc75d2895a92861ddfdfaabf60630975f5c9b45f12a4c9d5f4d724a4e86a",
+    "gen/c/include/dagr/arena.h": "sha256:8293d3443e65c60d49d28061ad3241211ba3147ba5d9ec832bae13b454646d39",
+    "gen/c/include/dagr/arrays.h": "sha256:878cffa62a9afba0bf3005d562136d84058768266f38ce78550eee34d26f5198",
+    "gen/c/include/dagr/graph_writer.h": "sha256:c8da765bd465eec38b0825b4aac89739493c0a8e3e71f306e44b6bfae8dbf076",
+    "gen/c/include/dagr/heap.h": "sha256:a436d94717959ee003a626b994e795df0403589f09012764d86bbc7faa6f1d6e",
+    "gen/c/include/dagr/owner.h": "sha256:44f8610daef9df5df37a2f78fa624253a324d4287e3595daad5af8fe67f88196",
+    "gen/c/include/dagr/packed.h": "sha256:abf6d31ae12930257dd09eaa4e2ad46af487caa534c6a15be1a7d8345ecf41c4",
+    "gen/c/include/dagr/reader.h": "sha256:f58cc695f751149d124128909f7d4e386b7cec1792b598273164d10a0e5891b8",
+    "gen/c/include/dagr/sb_core.h": "sha256:b7a91a0838f15512769dfe494774cde0c29c101418187c4eb7b39c8a963cfb05",
+    "gen/c/include/dagr/shared_buffer.h": "sha256:ff436a193ff1aa43a58fd4398a1c92393f47709b8b47f2b4926f8560023b3e92",
+    "gen/c/include/dagr/sink.h": "sha256:aa5b3ecc9eb11000d0e84fa70fe27323bd8ee38871ae0383d2f62bf7cca3f9b8",
+    "gen/c/include/dagr/values.h": "sha256:56fad849d8abbe5494539c0bef9c3ae0b02fa13b3b8f51b03d4c1808057a3b35",
+    "gen/c/include/dagr/writer.h": "sha256:7a5dad790848d218ed4c37315d353f17cba538ad3cb2fda5832416c4212b3db7",
+    "gen/c/include/dagr_signed_token/token.h": "sha256:ee578ad2b0920a9dcf9c901c513a17ba79187bec1efefedad2e64047a52ea823",
+    "gen/c/include/dagr_signed_token/token_arena.h": "sha256:5f57832007c93af84e63d622a8f8e09927f999f2fec35a979236fc2a58062cc6",
+    "gen/cpp/CMakeLists.txt": "sha256:a3e177a860fa0a72224a691698acfe806d89174881dde57fd7061ff7c3b658f6",
+    "gen/cpp/include/dagr/arena.hpp": "sha256:c5e7e248beae4036e60f0035215183a0d9b522456b98b4cf548e116371eb3d01",
+    "gen/cpp/include/dagr/arrays.hpp": "sha256:eba10a62f8ae3f579f87cf5034cdcbf2e4029410daca5556ac2e47f9e7432368",
+    "gen/cpp/include/dagr/fixed_writer.hpp": "sha256:f7401805eb99bda8e1701785786dcc19317ff15c54c56cd49791df1daef0dd08",
+    "gen/cpp/include/dagr/graph_writer.hpp": "sha256:371ac90fe0005abf90341f0b67884f48f3b75bafc7f12518d447ce9f80c20a7f",
+    "gen/cpp/include/dagr/owner.hpp": "sha256:953d688936b69558b01352148819546ece7d29177b73401be0c57d491d5f9720",
+    "gen/cpp/include/dagr/packed.hpp": "sha256:5a3bcb7ede3620de490005c3f5f783e435c14f20a18bff7ad7814287729b42fc",
+    "gen/cpp/include/dagr/reader.hpp": "sha256:239a6c5db0b311ac58c71fce3051f5357526795288f6b2751a7cd56159c43907",
+    "gen/cpp/include/dagr/shared_buffer.hpp": "sha256:2f1a5435ed308661fe31265f154229871002c4a6e58b7261a927ec80a467f432",
+    "gen/cpp/include/dagr/sink.hpp": "sha256:bc8c4117e22b00b8516ad383604016aa96d00d0eb004281e9942f21978d46795",
+    "gen/cpp/include/dagr/values.hpp": "sha256:713fb1fd41e761babcd76f44772b3d1125d48b6461ca3510ed90a6d60d43fe8c",
+    "gen/cpp/include/dagr/writer.hpp": "sha256:31cb2071053c4106d0a7e9b8cf80b2ba50b09434bc7e0c7c16da5b523c18a2e4",
+    "gen/cpp/include/dagr_signed_token/token.hpp": "sha256:08ea4d388049ace40a2072071a9f92ae81441d291ae33e6ce70d131ca3e7d417",
+    "gen/cpp/include/dagr_signed_token/token_arena.hpp": "sha256:ff02514e3ae85801819f248561e30acee02a7650fbc91c7c833c3ca4cf008727",
+    "gen/go/dagr/owner.go": "sha256:f8f0332e779d87407fa596c72e02cc3dbf24aebe886ab8f8ea3e30b02548bd24",
+    "gen/go/dagr/reader.go": "sha256:25a0af9bd4022447bbb9ee73ff74d3d87b6583b30e012200ca8d394bbbd5f58e",
+    "gen/go/dagr/writer.go": "sha256:c909456305c9297c77bf0cfb5ec293afdf3d58c391f538fd9ee51b4edd3f425b",
+    "gen/go/go.mod": "sha256:464ac42ef1a9b1f823a6a651ef775b4892ecd7c8915fccb33caf56b950de2ea1",
+    "gen/go/token.go": "sha256:f6da1336c40169266a47f4b278438114e77784bc9f0563e0e0442c9640afc904",
+    "gen/go/token_arena.go": "sha256:ea5b058ae306f652359412f0feb5aafa2a90edc61358924e0c2b4e34bc8f634e",
+    "gen/go/token_serde.go": "sha256:18e38645baac111f934a9e149b83cab111ef2c3924c23805edba952a64cc8dde",
+    "gen/go/tokendirect/token.go": "sha256:f608d876cc55f55defdd4a358bbd626122f5713933868e2aae3f1211ffc9ee8b",
+    "gen/java/src/main/java/dagr/runtime/ArenaArrays.java": "sha256:34cfdbaa0a164fa239974ab769320142ac3b45cea3453a7a875a880adf4dbaed",
+    "gen/java/src/main/java/dagr/runtime/ArrayBase.java": "sha256:bd85cd9711cff1e335d80863f0822452e7635eadb44c5edfb57edf56b527606d",
+    "gen/java/src/main/java/dagr/runtime/BF16Array.java": "sha256:4e8214b25c2c200318abe2e32c61ea7a5b6a9842149a487a67076fc4437ea38f",
+    "gen/java/src/main/java/dagr/runtime/BoolArray.java": "sha256:d4ab991292bef310cb38421b0a16dad39474fe033e7e606ea54c150477526cf7",
+    "gen/java/src/main/java/dagr/runtime/Builder.java": "sha256:b3a29e938e0dbb8790e7488b1d81d2ed45cb3f626ee8d291f97818c6244a55b9",
+    "gen/java/src/main/java/dagr/runtime/BytesArray.java": "sha256:35caa41fe1bfa39f3c60445c096fe83735c76f147796cc6884fb8205a5c38455",
+    "gen/java/src/main/java/dagr/runtime/Describer.java": "sha256:14941b5e1a51338876cb883cb350aff591f02a8597d45f66dd774d2370f167e9",
+    "gen/java/src/main/java/dagr/runtime/EnumArray.java": "sha256:dba3ce214c0d0743bca3986cd3d0b23da81d2bac839cf6df5d2eefab717f34dd",
+    "gen/java/src/main/java/dagr/runtime/F16Array.java": "sha256:0823620a6ee71eefdbbfec2695a05f80052fb2d54c9fbb803da4991b49639713",
+    "gen/java/src/main/java/dagr/runtime/F32Array.java": "sha256:1ac46b4365d6ee828f4e3612c923ec568dd1448a202955610326249d4c0bffa1",
+    "gen/java/src/main/java/dagr/runtime/F64Array.java": "sha256:74f033985c0e53c9657883859bf494a4caa1991b84ee3062c60077988763c521",
+    "gen/java/src/main/java/dagr/runtime/GraphWriter.java": "sha256:c8c6f10c592f6f5db766061c7cff68b40144980bbf413e53802ef1e666014afe",
+    "gen/java/src/main/java/dagr/runtime/I16Array.java": "sha256:b3709246fff2dba12f1d4d11456cbf8713b27c4e4bc43b51e85264769754f5e5",
+    "gen/java/src/main/java/dagr/runtime/I32Array.java": "sha256:ceb4a052d39dfa50d7aa5af74f45eefed92336fe47632f5be0e286003703c99f",
+    "gen/java/src/main/java/dagr/runtime/I64Array.java": "sha256:52ba1b859ea473ccdf9c2f9ce59a3011863ab7d21a2ed294e5f4ea1791ac05a4",
+    "gen/java/src/main/java/dagr/runtime/I8Array.java": "sha256:29207ef24002c877583e9a46e218ec2fafa9c5ca9a24577662a6fcde8e4d780f",
+    "gen/java/src/main/java/dagr/runtime/Owner.java": "sha256:a482ff04362840085133a889415b8ea9b64ba877981121cc32812ca54cec7914",
+    "gen/java/src/main/java/dagr/runtime/PackedArray.java": "sha256:bfc4d928e83dd15877984f12a44f59b752125e19f9fd9c1b2fa5eedd70fb0418",
+    "gen/java/src/main/java/dagr/runtime/PkBlobArray.java": "sha256:9bfd7a821130a778944c6d30b52869402b302a09b340aaf0ce8e81466e7556ae",
+    "gen/java/src/main/java/dagr/runtime/PkBoolArray.java": "sha256:3f5bc76667dee7d1e288b306d6fec56cef5b686ee3adfc4eaa44ae9d827832d0",
+    "gen/java/src/main/java/dagr/runtime/PkBytesArray.java": "sha256:5e5b12237f0ba72cb5ffe3d8a518c9defa4a01cb10120591bf0c4211544f930f",
+    "gen/java/src/main/java/dagr/runtime/PkEnumArray.java": "sha256:47bfdf8459425020942972252fcbca4562dd57fae72f424dba3bb9ba0ab57364",
+    "gen/java/src/main/java/dagr/runtime/PkF32Array.java": "sha256:d2ec13213481406b520b466c27552077cd0f107e476c83ed8f332a5b7120c9a3",
+    "gen/java/src/main/java/dagr/runtime/PkF64Array.java": "sha256:3c6067a742894c9d8b2a0f2588b9a0dd7fe27f260be75124e1d1b238bab45e29",
+    "gen/java/src/main/java/dagr/runtime/PkHalfArray.java": "sha256:006f55aa2434041aa0d1791dad4261653b2fe588f02de715d9034800985fb4c9",
+    "gen/java/src/main/java/dagr/runtime/PkIntArray.java": "sha256:728ab117e9f2b293db865af95154cd5367200a772a6b63ab15647055b4ad2477",
+    "gen/java/src/main/java/dagr/runtime/PkStrArray.java": "sha256:618f307b431417126fe2913417338b5cfc10c9387da4517c297d309f14dfc216",
+    "gen/java/src/main/java/dagr/runtime/PkUintArray.java": "sha256:3a3af7e53e54a789bd4b8d34da4ba0f1306b9ae6cf81622e942dbe2f0435f7d3",
+    "gen/java/src/main/java/dagr/runtime/PkUnionArray.java": "sha256:adc07419e9a5cc6b4dcd5d8263713fa1bb3563b468719f695512578bca43ce9f",
+    "gen/java/src/main/java/dagr/runtime/Reader.java": "sha256:184381f0b93ed3c76252017bc41ca7b416ce9df0b2fbbc6f93101c69c26233f3",
+    "gen/java/src/main/java/dagr/runtime/RestoreCtx.java": "sha256:e9ff64694c510400e14439f1e20c4dd82da41c13d5d8371c14e3cecb1692d791",
+    "gen/java/src/main/java/dagr/runtime/RestoreSeen.java": "sha256:6f3617c574449d6db444980a4b8d73419026a4b81345b1ee640b2cdc1bb7d547",
+    "gen/java/src/main/java/dagr/runtime/SharedBuffer.java": "sha256:dde87214257c88f68aed94eaeadcf5d9270fdd7f637d574c6ce987afad343653",
+    "gen/java/src/main/java/dagr/runtime/Sink.java": "sha256:3620bb429e413b9f82d8b14507e1a6bf800843384145fcaa96c47952768fc78c",
+    "gen/java/src/main/java/dagr/runtime/Status.java": "sha256:05c884718206434f865247dd0c61ecb8629bf20b336abd1c4d99bcad8195c791",
+    "gen/java/src/main/java/dagr/runtime/StrArray.java": "sha256:df207b57aa907169d4cb3d33f91633f108fa4cfe896100b13c9dd3c0d9756ac6",
+    "gen/java/src/main/java/dagr/runtime/U16Array.java": "sha256:876203a53756ef624b10950a8b78ef351f4483c99f572fcbbcc69cb4840f4778",
+    "gen/java/src/main/java/dagr/runtime/U32Array.java": "sha256:24872cead7298b56433e17a80133f33b9ff2e3e8944851933d0f4a5172352eed",
+    "gen/java/src/main/java/dagr/runtime/U64Array.java": "sha256:8d3177e60f7637328697992094ae19eaef808a2f807e4aa7d573f9d6c7b5bc01",
+    "gen/java/src/main/java/dagr/runtime/U8Array.java": "sha256:0aea787c58b557fb45402a4715839c420a45234eedcc98c5b75d6257b8c9aa66",
+    "gen/java/src/main/java/dagr/runtime/UnionArrayBase.java": "sha256:4a77a42472811b343c5f5948daf6b610a07ff267e9362c5010526fbf96c42d7c",
+    "gen/java/src/main/java/dagr/runtime/Writer.java": "sha256:80e5500348cc0866b6a7a95bff7d75be9c7f3bb968d665330e7f48b662370bc5",
+    "gen/java/src/main/java/token/Token.java": "sha256:f88382ec39845d958f39a2abb588003f5c7104c56ff0fb8d44688c44fa92a747",
+    "gen/java/src/main/java/token/TokenArena.java": "sha256:cac2ce53fe085cb189803b4507a53a83bf3568b2f830b1827dc8240283457583",
+    "gen/mojo/dagr_reader.mojo": "sha256:e7d724ba229cb9fdf51b0b3d8d6b99da34626b532dafe0e385fcaf57650a921d",
+    "gen/mojo/dagr_writer.mojo": "sha256:89531d49823b7c52b5f1050eb65c48b38f9e7c1278c1e20d0043148f9157a8c3",
+    "gen/mojo/token_arena.mojo": "sha256:f8f7718f87789760e8e232bae9ac5a24f5778b176e8a62c8bf87e5d39b44d69f",
+    "gen/mojo/token_direct.mojo": "sha256:d0b058613a8b7ca8bef01ad7a08f218d578efb6c034a2ae9adc61dec6ba4e285",
+    "gen/mojo/token_reader.mojo": "sha256:ef9dcb8cb1b12dd61d8eba0702f50192b488b4dde64ef642321e9f78aabc8bbe",
+    "gen/mojo/token_restore.mojo": "sha256:d89ad38d58aad729552dec3b3f9887beccf77f2fcbd9d49cd5a1adede101d869",
+    "gen/mojo/token_serde.mojo": "sha256:a237283e84da86acec0d2796ef98cf15af742b2e2bbc4056e358b6ae5b0e3d8a",
+    "gen/odin/runtime/dagr_reader.odin": "sha256:b2610cde116175b179b6292aff82149c22b90dc21d9ef9faf1dab6fe50865731",
+    "gen/odin/runtime/dagr_writer.odin": "sha256:6ae66aa02740ec6676c621da65970b81a78be3ff536ea3566c2a14a10f0930f1",
+    "gen/odin/token.odin": "sha256:61be6d3e6424b2fa1dcd38d130cdd4ef59c9e0eac7d378986e2c20d3e2a5f7d6",
+    "gen/python/dagr/__init__.py": "sha256:75da957be321ba4dfc96010f00a91668a9c13ac539d462d72917a0f175a8d868",
+    "gen/python/dagr/codegen/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gen/python/dagr/codegen/cfamily.py": "sha256:518e1041413cb8480d686a50d5816f4ccf74abbfb7a6ae28375228934e9e82f1",
+    "gen/python/dagr/codegen/cpp/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gen/python/dagr/codegen/cpp/naming.py": "sha256:6412b7fd12da279b7cf2f3b2fbeeb62754e74d9ae4ba2a84fa1083296731685b",
+    "gen/python/dagr/codegen/go/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gen/python/dagr/codegen/go/naming.py": "sha256:c3c1b001164240bbd62b9701c74ac6c043b3d9035b0efc399740dd5030a2fe88",
+    "gen/python/dagr/codegen/java/__init__.py": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "gen/python/dagr/codegen/java/naming.py": "sha256:1fee34c0adca945e4f7be6de89b168315f3618b894f164195fc824faac141b1d",
+    "gen/python/dagr/codegen/shared.py": "sha256:29c1ec5432628add32a671a477dcfbc003217956cd481cf0b5079c88cd3423c4",
+    "gen/python/dagr/config.py": "sha256:e6ee2031d300667399a2060536bb44dadb3e80a1d77522cb3e5a7a352b4c9597",
+    "gen/python/dagr/dsl.py": "sha256:f51c25721e451c51befdadbe327e6deb2bba972aae796c34551af866c016f238",
+    "gen/python/dagr/reserved_names.py": "sha256:72a5314a7f8e05a62848d3f6156ccedee141b1265208eba1cfaca07ad04014c5",
+    "gen/python/dagr/runtime/__init__.py": "sha256:c7a991e879ffd31feee4ed63f20adcbd263ec75313ed54302d6211447f59a5f9",
+    "gen/python/dagr/runtime/dagr_defaults.py": "sha256:c65155c3b75750b959c7ddfa33f0dc8570e54ec7dcefccf6cfe558b3094132e2",
+    "gen/python/dagr/runtime/dagr_model.py": "sha256:b20c014cf6c73455de7a8b6ab851afcfd9afc30876f870272cba5f759f1bf370",
+    "gen/python/dagr/runtime/dagr_reader.py": "sha256:02969ed5a1b570db156d19bab39f04173a357599558fa0596774b13606a0b90c",
+    "gen/python/dagr/runtime/dagr_restore.py": "sha256:51118251474d55fab2a77714fbe9a257964584b456c13a4bc4bf2f9aa30e8597",
+    "gen/python/dagr/runtime/dagr_serialize.py": "sha256:2b1fc005327d741ff2ca3d031999c2f6ca487e940c2632334c829fe04d6d236c",
+    "gen/python/dagr/runtime/dagr_typed.py": "sha256:911c336680f995768632e45c8a54fa9d5d92d7afb784251b58bd11d9a309b5a7",
+    "gen/python/dagr/runtime/dagr_writer.py": "sha256:a6ffa4be884d7dfd3ad184ca4b3371c62c8764abe1e0b7b84cd9591eb60381b2",
+    "gen/python/dagr_schema.py": "sha256:24f8a7d6333c93c78fdd4fb91839597a119d320993fb6b70d99491b043536c77",
+    "gen/python/token.py": "sha256:7127523e747e4a394af65ab59bf14213b96f34ca54ef52cb5e2cec7a6a3203d4",
+    "gen/rust/Cargo.toml": "sha256:71ae3b1a8637455cdccab6fc2a7ba0723b12db7979b2b0ced045db22122caba8",
+    "gen/rust/build.rs": "sha256:ef0170542199cbb707b78fb06eac8978eceb6bf64e710aabd54943134da4a62c",
+    "gen/rust/src/dagr_runtime.rs": "sha256:168293023ff366501e84bcc4a87a98104cc052a29f9c4d516fd607718e580e76",
+    "gen/rust/src/lib.rs": "sha256:e8ab11c033ba314ec546e47789733ca3750b2a5d5b17efe60c8c896042fa0b30",
+    "gen/rust/src/token.rs": "sha256:0e8f30b1b781459d05a631e5dc729f8ff99161bb90f5b0db6216826c03fe45d4",
+    "gen/rust/src/token_core.rs": "sha256:f625c6f7abccc53da7ac839f8161e5cfc6ffd25018a6a0c535aa34fcbee428e3",
+    "gen/rust/src/token_lazy.rs": "sha256:65b4eee0cd7c0c66dbe83736e93396430605d2bc133748577e7a1fd376fdee2f",
+    "gen/swift/Package.swift": "sha256:0193e79d425bb4d8b7c087923099d91e78fa562d211a5d01c8de2493e5e53a2f",
+    "gen/swift/Sources/dagr_signed_token/DagrRuntime.swift": "sha256:1c3b0a4d295d5b35e284de6b341b8c9c874dbd3e4f68cd0b228d4f2dd7faa30c",
+    "gen/swift/Sources/dagr_signed_token/Token.swift": "sha256:b2853a1a67adb4c01f70d2b19912620c8d13a393c7e4a07a8ac847a1f9ec168a",
+    "gen/swift/Sources/dagr_signed_token/TokenLazy.swift": "sha256:132a4534cf7cb8c3fecc669eb32e879ab812d7fb0fd0df0f5b4ea5af37d05147",
+    "gen/typescript/Token.ts": "sha256:053e47b45f95b5437f804db76fe347a53c9176930ec0e370b259d19996d1aca9",
+    "gen/typescript/Token_arena.ts": "sha256:135316fccc810e641647627a756f90282ad2ba670a9c6f648ec34f7cdef3743e",
+    "gen/typescript/Token_direct.ts": "sha256:4d6b296c3096635952eee6f394855db71fea03ac0323d47063cff37092a42d37",
+    "gen/typescript/Token_serde.ts": "sha256:3f180ff2eb575be38cbb735083927f4a65ba076f9160af4fe4ad29f432b36e83",
+    "gen/typescript/dagr_reader.ts": "sha256:a450897947ff5431d32ccad639d2182237ccd7b73370a1e37af4e0db1ae26b1e",
+    "gen/typescript/dagr_writer.ts": "sha256:30f5ff87872136875d0ddec215fb3372ecc666936ac8cbb35c0fc925e3743606"
+  },
+  "provenance": {
+    "command": "dagr build",
+    "generated_at": "2026-11-08T17:39:44.144230+00:00",
+    "host": null,
+    "tool_version": "dagr 2026.11.8"
+  },
+  "receipt_version": 1,
+  "targets": [
+    {
+      "exclude": [],
+      "features": [
+        "lazy"
+      ],
+      "lang": "swift",
+      "layout": "package",
+      "out": "gen/swift",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [
+        "lazy"
+      ],
+      "lang": "rust",
+      "layout": "crate",
+      "out": "gen/rust",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "typescript",
+      "layout": null,
+      "out": "gen/typescript",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "mojo",
+      "layout": null,
+      "out": "gen/mojo",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "odin",
+      "layout": null,
+      "out": "gen/odin",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "go",
+      "layout": null,
+      "out": "gen/go",
+      "package": "token"
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "cpp",
+      "layout": null,
+      "out": "gen/cpp",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "c",
+      "layout": null,
+      "out": "gen/c",
+      "package": null
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "java",
+      "layout": null,
+      "out": "gen/java",
+      "package": "token"
+    },
+    {
+      "exclude": [],
+      "features": [],
+      "lang": "python",
+      "layout": null,
+      "out": "gen/python",
+      "package": null
+    }
+  ]
+}

@@ -44,6 +44,33 @@ echo "== [build] Odin =="
 odin build examples/odin -out:examples/odin/dst-odin -o:speed
 ODIN=(./examples/odin/dst-odin)
 
+echo "== [build] Go =="
+(cd examples/go && go build -o dst-go .)
+GO=(./examples/go/dst-go)
+
+echo "== [build] C++ =="
+c++ -std=c++17 -O2 -Wall -Wextra -I gen/cpp/include examples/cpp/main.cpp -o examples/cpp/dst-cpp
+CPP=(./examples/cpp/dst-cpp)
+
+echo "== [build] C =="
+cc -std=c11 -O2 -Wall -Wextra -I gen/c/include examples/c/main.c -lm -o examples/c/dst-c
+./examples/c/dst-c test
+C=(./examples/c/dst-c)
+
+echo "== [build] Java =="
+# A JDK 22+: JAVA_HOME when set, else a `javac` on PATH that runs (macOS ships a stub that
+# only says "Unable to locate a Java Runtime"), else Homebrew's keg-only openjdk.
+JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/}"
+if [ -z "$JAVA_BIN" ] && ! javac -version >/dev/null 2>&1 && [ -x /opt/homebrew/opt/openjdk/bin/javac ]; then
+  JAVA_BIN=/opt/homebrew/opt/openjdk/bin/
+fi
+rm -rf examples/java/build
+"${JAVA_BIN}javac" --release 22 -d examples/java/build $(find gen/java/src/main/java -name '*.java') examples/java/Main.java
+JAVA=("${JAVA_BIN}java" -cp examples/java/build Main)
+
+echo "== [build] Python (pure-Python target, no build step) =="
+PY=(python3 examples/python/demo.py)
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -53,13 +80,23 @@ emit_swift()  { "${SWIFT[@]}"  emit   "$1"; }
 emit_ts()     { "${TS[@]}"     emit   "$1"; }
 emit_mojo()   { "${MOJO[@]}"   emit   "$1"; }
 emit_odin()   { "${ODIN[@]}"   emit   "$1"; }
+emit_go()     { "${GO[@]}"     emit   "$1"; }
+emit_cpp()    { "${CPP[@]}"    emit   "$1"; }
+emit_c()      { "${C[@]}"      emit   "$1"; }
+emit_java()   { "${JAVA[@]}"   emit   "$1"; }
+emit_python() { "${PY[@]}"     emit   "$1"; }
 verify_rust()   { "${RUST[@]}"   verify "$1"; }
 verify_swift()  { "${SWIFT[@]}"  verify "$1"; }
 verify_ts()     { "${TS[@]}"     verify "$1"; }
 verify_mojo()   { "${MOJO[@]}"   verify "$1"; }
 verify_odin()   { "${ODIN[@]}"   verify "$1"; }
+verify_go()     { "${GO[@]}"     verify "$1"; }
+verify_cpp()    { "${CPP[@]}"    verify "$1"; }
+verify_c()      { "${C[@]}"      verify "$1"; }
+verify_java()   { "${JAVA[@]}"   verify "$1"; }
+verify_python() { "${PY[@]}"     verify "$1"; }
 
-LANGS=(rust swift ts mojo odin)
+LANGS=(rust swift ts mojo odin go cpp c java python)
 
 echo
 echo "== [emit] each language mints its token =="

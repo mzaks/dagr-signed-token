@@ -26,6 +26,10 @@
 #  • JWT-lib overheads differ too: JWTKit (Swift) is async + BoringSSL HMAC, jsonwebtoken
 #    (Rust/TS) is sync native, PyJWT is pure Python — so the `jwt` rows aren't comparable to
 #    each other, only each to its own language's `dagr` row.
+#  • Go, C++, C, Java and pure Python bench Dagr only (no JWT baseline yet). C and C++ mint
+#    through the arena (their direct builders don't write a header yet); Go and C/C++ verify
+#    with HMAC from Go's stdlib / examples/c/hmac_sha256.h (ARMv8 SHA instructions when
+#    available), Java with javax.crypto. Pure Python runs 5k reps (it is ~100x slower).
 #  • Numbers are wall-clock ns/op on THIS machine; treat as ratios, not absolutes.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -56,6 +60,22 @@ pixi run --manifest-path "$MOJO_PIXI" mojo build -I "$ROOT/gen/mojo" \
 MOJO=(pixi run --manifest-path "$MOJO_PIXI" "$ROOT/examples/mojo/dst-mojo")
 odin build examples/odin -out:examples/odin/dst-odin -o:speed
 ODIN=(./examples/odin/dst-odin)
+(cd examples/go && go build -o dst-go .)
+GO=(./examples/go/dst-go)
+c++ -std=c++17 -O2 -I gen/cpp/include examples/cpp/main.cpp -o examples/cpp/dst-cpp
+CPP=(./examples/cpp/dst-cpp)
+cc -std=c11 -O2 -I gen/c/include examples/c/main.c -lm -o examples/c/dst-c
+C=(./examples/c/dst-c)
+# A JDK 22+: JAVA_HOME when set, else a `javac` on PATH that runs (macOS ships a stub), else
+# Homebrew's keg-only openjdk.
+JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/}"
+if [ -z "$JAVA_BIN" ] && ! javac -version >/dev/null 2>&1 && [ -x /opt/homebrew/opt/openjdk/bin/javac ]; then
+  JAVA_BIN=/opt/homebrew/opt/openjdk/bin/
+fi
+rm -rf examples/java/build
+"${JAVA_BIN}javac" --release 22 -d examples/java/build $(find gen/java/src/main/java -name '*.java') examples/java/Main.java
+JAVA=("${JAVA_BIN}java" -cp examples/java/build Main)
+PYPURE=(python3 examples/python/demo.py)
 # Python = a ctypes binding over the Rust cdylib; PyJWT is its classic-JWT baseline, set up
 # best-effort in a cached bench-only venv (skipped, with just the dagr row, if unavailable).
 cargo build --release --quiet --manifest-path examples/python-ffi/dagr_token_ffi/Cargo.toml
@@ -77,8 +97,13 @@ bench_ts()     { "${TS[@]}"     bench; }
 bench_python() { "${PYFFI[@]}"; }                            # dagr (ctypes→Rust) + PyJWT + CWT/COSE baselines
 bench_mojo()   { "${MOJO[@]}"   bench; }
 bench_odin()   { "${ODIN[@]}"   bench; }
+bench_go()     { "${GO[@]}"     bench; }
+bench_cpp()    { "${CPP[@]}"    bench; }
+bench_c()      { "${C[@]}"      bench; }
+bench_java()   { "${JAVA[@]}"   bench; }
+bench_pypure() { "${PYPURE[@]}" bench; }                     # the pure-Python target: 5k reps
 
-LANGS=(rust swift ts python mojo odin)
+LANGS=(rust swift ts python mojo odin go cpp c java pypure)
 OUT="$(mktemp)"; trap 'rm -f "$OUT"' EXIT
 
 echo

@@ -13,7 +13,7 @@ with Dagr's customizable header (spec 15, "Customizable Header"), Shape A:
 Edit here, then run `dagr build`.
 """
 from dagr.dsl import t, required, timestamp, Node, UnionType, DataGraph
-from dagr.config import Library, Swift, Rust, TypeScript, Python, Mojo, Odin
+from dagr.config import Library, Swift, Rust, TypeScript, Python, Mojo, Odin, Go, Cpp, C, Java
 
 TOKEN = DataGraph(
     "Token",
@@ -66,10 +66,9 @@ TOKEN = DataGraph(
     deletable=False,
 )
 
-# Targets = the languages that support BOTH the customizable header (spec 14) AND a
-# recursive union under a frozen+packed node: Swift, Rust, TypeScript, Mojo, and Odin
-# (Python via examples/python-ffi). See README "Language coverage" for why the rest are out:
-#   • Kotlin / Zig  — no customizable header yet
+# Every Dagr target: each supports the customizable header (spec 15) and a recursive union
+# under a frozen+packed node. Python is generated twice over: the pure-Python target here,
+# and the Rust codec behind examples/python-ffi.
 library = Library(
     "dagr-signed-token",
     schemas=[TOKEN],
@@ -79,6 +78,11 @@ library = Library(
         TypeScript(out="gen/typescript"),
         Mojo(out="gen/mojo"),
         Odin(out="gen/odin"),
+        Go(out="gen/go", package="token"),
+        Cpp(out="gen/cpp"),
+        C(out="gen/c"),
+        Java(out="gen/java", package="token"),
+        Python(out="gen/python"),
     ],
     wire_format_version=1,
 )

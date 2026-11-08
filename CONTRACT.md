@@ -2,8 +2,8 @@
 
 Every language example mints the **exact same token**, so the buffers are
 byte-for-byte identical and each language can verify the others'. The shared
-constants and rules below are the contract — keep them identical across
-`examples/rust`, `examples/swift`, `examples/typescript`.
+constants and rules below are the contract — keep them identical across every example in
+`examples/` (rust, swift, typescript, mojo, odin, go, cpp, c, java, python, python-ffi).
 
 ## Constants
 

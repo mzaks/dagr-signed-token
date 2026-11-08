@@ -1,11 +1,11 @@
 # dagr-signed-token
 
 A **JWT-shaped signed token**, defined once as a [Dagr](https://codeberg.org/mzaks/dagr) schema
-and generated into **Swift, Rust, TypeScript, Mojo, and Odin** — with a
-cross-language test that proves every language mints the **byte-for-byte identical**
-token and can verify the others'.
+and generated into **ten languages: Rust, Swift, TypeScript, Mojo, Odin, Go, C++, C, Java and
+Python** — with a cross-language test that proves every language mints the **byte-for-byte
+identical** token and can verify the others'.
 
-> **The generated code is committed.** All five examples build, run, and cross-verify from
+> **The generated code is committed.** All ten examples build, run, and cross-verify from
 > `gen/`, without installing Dagr. `schema.py` is the single source of truth; to change it,
 > install the Dagr CLI (`pip install dagr-cli`, source at
 > [codeberg.org/mzaks/dagr](https://codeberg.org/mzaks/dagr)) and run `dagr build`.
@@ -36,7 +36,7 @@ match to the byte.
 schema.py            the single source of truth — the Token graph + a Library(targets=[...])
                      (`dagr build` regenerates gen/ from it)
 CONTRACT.md          the shared constants every example mints (so buffers match)
-gen/                 COMMITTED generated code: gen/{swift,rust,typescript,mojo,odin}/
+gen/                 COMMITTED generated code: gen/{rust,swift,typescript,mojo,odin,go,cpp,c,java,python}/
 examples/
   rust/              Cargo bin — path-deps the generated crate; sha256.rs is hand-rolled
   swift/             main.swift + Crypto.swift, compiled against gen/swift sources
@@ -47,6 +47,15 @@ examples/
                      crypto.mojo — hand-rolled HMAC-SHA256; the SHA-256 core is picked at
                      comptime: ARMv8 crypto, x86-64 SHA-NI, or a portable scalar fallback
   odin/              main.odin — imports gen/odin + its runtime, HMAC via core:crypto/hmac
+  go/                main.go — the generated module (direct builder + header gate), HMAC from
+                     Go's standard library
+  cpp/               main.cpp — the generated header-only library (arena + lazy reader),
+                     HMAC from ../c/hmac_sha256.h
+  c/                 main.c — the generated header-only C11 library (arena + lazy reader);
+                     hmac_sha256.h — hand-rolled SHA-256/HMAC, self-tested (NIST, RFC 4231)
+  java/              Main.java — the generated sources (arena + lazy reader), HMAC via javax.crypto
+  python/            demo.py — the generated pure-Python target (it ships its own Dagr runtime),
+                     HMAC via hashlib
   python-ffi/        Python over a Rust cdylib (ctypes) — fast, self-contained; see its README
 run_cross_lang.sh    (build →) mint in each language → N×N verify → assert byte-identity
 run_bench.sh         (build optimized →) 50k-rep mint/verify per language → ns/op table
@@ -57,10 +66,12 @@ run_bench.sh         (build optimized →) 50k-rep mint/verify per language → 
 The examples build from the **committed** `gen/` — you do **not** need the `dagr` CLI.
 You need: `cargo` / `rustc`, `swiftc`, `node` (v22+; the TS demo runs via `npx tsx`),
 `pixi` (for Mojo — the example builds against a Mojo pixi environment, locked for
-`osx-arm64` and `linux-64`), and `odin`.
+`osx-arm64` and `linux-64`), `odin`, `go` (1.23+), a C11 / C++17 compiler, a JDK 22+ (found
+through `JAVA_HOME`, the `PATH`, or Homebrew's `openjdk`), and `python3`.
 
-All five languages build, cross-verify and benchmark on **both macOS-arm64 and Linux-x86_64**,
-so `run_cross_lang.sh` and `run_bench.sh` run end to end on either. The two platform-specific
+Rust, Swift, TypeScript, Mojo and Odin build, cross-verify and benchmark on **both macOS-arm64
+and Linux-x86_64**. Go, C++, C, Java and pure Python were added later and are cross-verified on
+macOS-arm64 so far; they use only their standard libraries and the generated code. The two platform-specific
 pieces are handled in-tree and stay dependency-free: Swift's HMAC is CommonCrypto on macOS and
 hand-rolled where CommonCrypto does not exist, and Mojo's SHA-256 core is chosen at comptime
 (ARMv8 crypto / x86-64 SHA-NI / portable scalar).
@@ -94,8 +105,23 @@ npx tsx examples/typescript/demo.ts
 pixi run --manifest-path examples/mojo/pixi.toml \
   mojo run -I gen/mojo examples/mojo/main.mojo
 
-# Odin (HMAC via core:crypto/hmac)
-odin run examples/odin -out:examples/odin/dst-odin
+# Odin (HMAC via core:crypto/hmac). -o:speed: an unoptimized build hits an Odin compiler
+# bug (dev-2026-07) that writes the custom claim's later members empty
+odin run examples/odin -out:examples/odin/dst-odin -o:speed
+
+# Go
+(cd examples/go && go run .)
+
+# C++ and C (header-only; SHA-256/HMAC from examples/c/hmac_sha256.h)
+c++ -std=c++17 -O2 -I gen/cpp/include examples/cpp/main.cpp -o examples/cpp/dst-cpp && ./examples/cpp/dst-cpp
+cc -std=c11 -O2 -I gen/c/include examples/c/main.c -lm -o examples/c/dst-c && ./examples/c/dst-c
+
+# Java (22+)
+javac --release 22 -d examples/java/build $(find gen/java/src/main/java -name '*.java') examples/java/Main.java
+java -cp examples/java/build Main
+
+# Python (the pure-Python target; see examples/python-ffi for the Rust codec over ctypes)
+python3 examples/python/demo.py
 ```
 
 Each prints the mint size and five verification outcomes:
@@ -118,12 +144,12 @@ Verification:
 
 ```
 == [byte-identity] all minted tokens must be identical ==
-  IDENTICAL (207 bytes) — rust == swift == ts == mojo == odin
+  IDENTICAL (207 bytes) — rust == swift == ts == mojo == odin == go == cpp == c == java == python
 == [cross-verify] every verifier reads every language's token ==
   rust   verifies rust   : OK
   swift  verifies rust   : OK
   ts     verifies rust   : OK
-  … (25 combinations: every one of 5 languages verifies every language's token) …
+  … (100 combinations: every one of 10 languages verifies every language's token) …
 == ALL GREEN ==
 ```
 
@@ -152,24 +178,45 @@ crypto-matched); Swift Dagr uses **CommonCrypto** on macOS and a hand-rolled
 SHA-256/HMAC where CommonCrypto is absent (Linux), which costs it ~1.2 µs/op. **Mojo** shows two arena-free build
 strategies: **`reflect`** —
 serialize straight from a live value struct via comptime reflection, no intermediate tree —
-and **`tree`** — a `DirectJson` value tree. Representative run (Apple Silicon; ns/op —
-ratios, not absolutes):
+and **`tree`** — a `DirectJson` value tree. Representative run (Apple Silicon, generated with
+dagr-cli 2026.11.8; ns/op — ratios, not absolutes):
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
-| rust | dagr | 451 | **205** | **207** |
-| rust | jwt (`jsonwebtoken`) | 937 | 1519 | 395 |
-| rust | cwt (`coset`) | 1360 | 1980 | **200** |
-| swift | dagr | 3317 | **673** | 207 |
-| swift | jwt (`JWTKit`) | 25111 | 30565 | 368 |
-| ts | dagr | 4840 | 2079 | 207 |
-| ts | jwt (`jsonwebtoken`) | 1636 | 2085 | 395 |
-| python | dagr (`ctypes`→Rust) | 5047 | 2882 | 207 |
-| python | jwt (`PyJWT`) | 6025 | 7643 | 365 |
-| python | cwt (`pycose`) | 23165 | 11100 | **200** |
-| mojo | dagr (reflect) | 1015 | 360 | 207 |
-| mojo | dagr (tree) | 1355 | 360 | 207 |
-| odin | dagr | 785 | 283 | 207 |
+| rust | dagr | 402 | **206** | **207** |
+| rust | jwt (`jsonwebtoken`) | 924 | 1532 | 395 |
+| rust | cwt (`coset`) | 1423 | 2066 | **200** |
+| swift | dagr | 3159 | **717** | 207 |
+| swift | jwt (`JWTKit`) | 24486 | 30391 | 368 |
+| ts | dagr | 3233 | 1815 | 207 |
+| ts | jwt (`jsonwebtoken`) | 1800 | 2316 | 395 |
+| python | dagr (`ctypes`→Rust) | 5164 | 2868 | 207 |
+| python | jwt (`PyJWT`) | 6035 | 7963 | 365 |
+| python | cwt (`pycose`) | 24244 | 11547 | **200** |
+| mojo | dagr (reflect) | 970 | 378 | 207 |
+| mojo | dagr (tree) | 1388 | 378 | 207 |
+| odin | dagr | 751 | 295 | 207 |
+| go | dagr | 858 | 684 | 207 |
+| cpp | dagr (arena) | 1028 | 308 | 207 |
+| c | dagr (arena) | 1059 | 338 | 207 |
+| java | dagr (arena) | 1304 | 488 | 207 |
+| python | dagr (pure Python) | 48762 | 38037 | 207 |
+
+**The last five rows** were added with dagr-cli 2026.11.8 and bench Dagr only; no JWT baseline
+yet. What they measure, and what their verify time is made of:
+- **Go** mints with the direct builder. Its verify is ~245 ns of HMAC (Go's standard library)
+  plus ~320 ns for the **validating open**, which walks the whole token once (bounds, depth,
+  UTF-8) before the getters read it. Go's lazy getters may panic on malformed bytes by design,
+  so a Go reader validates first; Rust's lazy reader is safe on any bytes without a walk.
+- **C++ and C** mint through the **arena** (`serialize_with_header`): Dagr's C and C++ direct
+  builders don't write a header yet, and the arena path allocates per node. Their HMAC is the
+  shared `examples/c/hmac_sha256.h`. It uses the ARMv8 SHA-256 instructions when the compiler
+  targets them, which takes the HMAC from ~1,030 to ~290 ns (CommonCrypto: ~380 ns), so the
+  read itself is ~20–50 ns of their verify.
+- **Java** mints through the arena too, and verifies with `javax.crypto` and the lazy reader
+  (JIT warmed with a full round before timing).
+- **Pure Python** is the eager, reflective target: verify decodes the whole token. It runs 5k
+  reps rather than 50k; the `python` row above it is the Rust codec behind `ctypes`.
 
 The **`cwt`** rows are the load-bearing comparison — CWT/COSE (RFC 8392 / RFC 9052 `COSE_Mac0`,
 HMAC-SHA256) is the *binary* peer of JWT, so this, not base64url JSON, is the honest test.
@@ -181,8 +228,8 @@ Two takeaways:
   both; it is *not* where Dagr beats CWT.
 - **Speed is where Dagr wins.** The `rust cwt` row is a **tuned native** stack — `coset`
   (RustCrypto COSE) + `ciborium` + **`ring`**, the *same* HMAC crate as the Dagr row — so it is
-  a fair format-vs-format efficiency test at matched crypto. Dagr mints **~3× faster** (451 vs
-  1360 ns) and verifies **~10× faster** (205 vs 1980 ns). The verify gap is the real story:
+  a fair format-vs-format efficiency test at matched crypto. Dagr mints **~3.5× faster** (402 vs
+  1423 ns) and verifies **~10× faster** (206 vs 2066 ns). The verify gap is the real story:
   Dagr's **verify-before-parse + zero-alloc lazy read** touches only `algorithm`/`signature`/
   `exp`/`aud`, while the COSE path parses the whole envelope and CBOR-decodes the entire claims
   map into an owned tree before it can check anything. A hand-rolled partial CBOR scan would
@@ -198,7 +245,8 @@ header — an algorithm identifier bound *into* the MAC (this token pins HS256 b
 
 The same harness on **Linux x86-64** (Ryzen AI 9 HX 370, Node 25, Swift 6.3) — a different
 machine *and* different per-language crypto, so read it against itself, not against the table
-above:
+above. It was measured with the earlier generated code, before Go, C++, C, Java and pure Python
+joined, and has not been re-run since:
 
 | lang | impl | mint (ns) | verify (ns) | size (B) |
 |---|---|--:|--:|--:|
@@ -227,9 +275,9 @@ Sizes are identical, as they must be — the `cwt` rows included, at **200 B** o
 (CBOR encoding is deterministic). Those rows now carry Linux **speeds** as well, where they
 previously read `—`: the CWT result **survives the platform change but narrows**. Against the
 tuned native `coset` + `ciborium` + `ring` stack at matched crypto, Dagr mints **~2× faster**
-(514 vs 1041 ns; it was ~3× on Apple Silicon) and verifies **~8× faster** (283 vs 2327 ns;
+(514 vs 1041 ns; it is ~3.5× on Apple Silicon) and verifies **~8× faster** (283 vs 2327 ns;
 was ~10×). The narrowing is on COSE's side of the ledger — `coset` mints *faster* here than on
-the M-series box (1041 vs 1360 ns) while Dagr's mint is a touch slower — so the ratio moved
+the M-series box (1041 vs 1423 ns) while Dagr's mint is a touch slower — so the ratio moved
 without the shape changing: near-parity on size, a large multiple on verify, because
 verify-before-parse still beats CBOR-decoding the whole claims map before anything can be
 checked. One ordering holds on both machines and is easy to miss: `coset`'s CWT verify is
@@ -240,7 +288,7 @@ is a Python object per COSE element — platform barely enters into it.
 
 Two rows move for platform reasons rather than format reasons: **Swift** verify is the
 hand-rolled HMAC standing in for CommonCrypto (its SHA-256 compression is ~240 ns/block against
-CommonCrypto's asm), and **Mojo** verify (360 → 447 ns) is SHA-NI in place of the ARMv8 crypto
+CommonCrypto's asm), and **Mojo** verify (378 → 447 ns) is SHA-NI in place of the ARMv8 crypto
 extensions. **TS** mint is ~2.6× slower on this box — a Node/JIT difference, not a codec change.
 
 **What it shows** — the token is **207 B vs a classic JWT's 395 B (~48 % smaller)** in
@@ -251,18 +299,18 @@ the *binary* peer **CWT/COSE the size is ~parity** (200 vs 207 B), and Dagr's ed
 faster at matched crypto (both machines; see the CWT note under the first table), plus
 byte-identity and typed reads. On *speed*, the compiled targets' standout
 is **verify** — verify-before-parse + zero-alloc lazy read vs base64-decode + full
-deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (205 vs 1519 ns, crypto
-matched); **Swift ~45×** faster than JWTKit (673 vs 30 565 ns — see the decomposition below for
-where JWTKit's 30 µs goes); **Python (ctypes→Rust) ~2.7×** faster than PyJWT (2882 vs 7643 ns);
-**Mojo and Odin** verify in ~300–360 ns. That's the hot path for a token you mint once and
-check on every request. **Mint** is more mixed: Rust Dagr now mints *faster* than a real JWT
-lib (451 vs 937 ns), and Python-over-Rust edges PyJWT (5047 vs 6025 ns); Mojo's reflection
+deserialize. **Rust verifies ~7× faster** than `jsonwebtoken` (206 vs 1532 ns, crypto
+matched); **Swift ~42×** faster than JWTKit (717 vs 30 391 ns — see the decomposition below for
+where JWTKit's 30 µs goes); **Python (ctypes→Rust) ~2.8×** faster than PyJWT (2868 vs 7963 ns);
+**Mojo, Odin, C++ and C** verify in ~300–380 ns. That's the hot path for a token you mint once
+and check on every request. **Mint** is more mixed: Rust Dagr mints *faster* than a real JWT
+lib (402 vs 924 ns), and Python-over-Rust edges PyJWT (5164 vs 6035 ns); Mojo's reflection
 path mints in ~1 µs; Swift
-Dagr mint (~3.5 µs) still trails Rust — its **flat claims serialize in ~450 ns, but the
+Dagr mint (~3.2 µs) still trails Rust — its **flat claims serialize in ~450 ns, but the
 recursive-JSON `custom` claim is ~1.9 µs** (Swift value-semantics + ARC over the generic
-`Array`/`indirect enum` store — the next optimization target, see below). In Node the
-heavily-optimized *native* `JSON`+crypto still beats the interpreted TS Dagr codec on raw
-speed. Dagr's durable wins are **size**, **cross-language byte-identity**, **type-safe lazy
+`Array`/`indirect enum` store — the next optimization target, see below). In Node, TS Dagr
+now verifies faster than `jsonwebtoken` (1815 vs 2316 ns), while Node's native `JSON` still
+mints faster than the TS Dagr codec (1800 vs 3233 ns). Dagr's durable wins are **size**, **cross-language byte-identity**, **type-safe lazy
 reads**, and **fast verify** in compiled targets.
 
 **Where JWTKit's ~30 µs goes** (the surprise: a *compiled* Swift JWT lib trailing even
@@ -421,9 +469,9 @@ node-refs) to on-access getters (scalars stay eager) cut verify **~3.1 µs → ~
   and RS256↔HS256 confusion attacks.
 - **Two layers.** Crypto (signature, algorithm) in the gate; semantics (`exp`,
   `aud`) after decode, over the now-trusted body.
-- **One wire, every language.** Same schema → identical bytes in Swift, Rust, and
-  TypeScript. A Rust service can mint a token a TypeScript client verifies, with no
-  interop layer and nothing to canonicalize.
+- **One wire, every language.** Same schema → identical bytes in all ten languages. A Rust
+  service can mint a token a Java, Go or TypeScript client verifies, with no interop layer and
+  nothing to canonicalize.
 
 ## Language coverage
 
@@ -437,8 +485,15 @@ The token needs the **customizable header** (spec 15, to carry the signature) *a
 | TypeScript | ✅ | ✅ | ✅ |
 | Mojo | ✅ | ✅ | ✅ |
 | Odin | ✅ | ✅ | ✅ |
-| Python | ✅ | ✅ | ✅ (via `python-ffi`) |
-| Go, C, C++, Java | ✅ | ✅ | not yet: generated by Dagr, not wired into this repo |
+| Go | ✅ | ✅ | ✅ (direct builder + header gate) |
+| C++ | ✅ | ✅ | ✅ (arena + lazy reader) |
+| C | ✅ | ✅ | ✅ (arena + lazy reader) |
+| Java | ✅ | ✅ | ✅ (arena + lazy reader) |
+| Python | ✅ | ✅ | ✅ (the pure-Python target, and `python-ffi`) |
+
+C and C++ mint through the arena's `serialize_with_header`: their direct builders don't write a
+header yet (the generator says so when it runs). The benchmark tables below cover the first
+five languages and the Python FFI; the other five are cross-verified but not benchmarked yet.
 
 For Python, **`examples/python-ffi/`** calls the generated Rust codec through a small C ABI
 (`ctypes`): byte-identical to the other targets, and faster + 43% smaller than an equivalent

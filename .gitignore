@@ -1,5 +1,5 @@
-# Generated code (gen/) is COMMITTED so the examples build and run WITHOUT the (closed-source)
-# dagr CLI — this repo is a self-contained reference. Only build artifacts under it are ignored.
+# Generated code (gen/) is COMMITTED so the examples build and run WITHOUT the dagr CLI — this
+# repo is a self-contained reference. Only build artifacts under it are ignored.
 
 # Build artifacts
 target/
@@ -7,6 +7,10 @@ node_modules/
 examples/swift/dst-swift
 examples/mojo/dst-mojo
 examples/odin/dst-odin
+examples/go/dst-go
+examples/cpp/dst-cpp
+examples/c/dst-c
+examples/java/build/
 __mojocache__/
 *.bin
 
@@ -22,7 +26,5 @@ __pycache__/
 # bench-only PyJWT venv (created by run_bench.sh)
 .bench-venv/
 
-# closed-source dagr CLI artifacts (recreated only if you have the CLI + run `dagr build`)
-dagr.lock.json
+# dagr CLI scratch (dagr.lock.json, the generation receipt, IS committed: `dagr check` diffs it)
 .dagr/
-gen/python/
